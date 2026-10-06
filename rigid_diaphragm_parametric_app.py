@@ -352,6 +352,71 @@ def benchmark_table(result: Dict[str, object]) -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 # UI helpers
 # -----------------------------------------------------------------------------
+
+def inject_professional_css() -> None:
+    st.markdown(
+        """
+        <style>
+        html, body, [class*="css"], .stApp, .stMarkdown, .stText, .stDataFrame,
+        [data-testid="stMetricValue"], [data-testid="stMetricLabel"],
+        .stTabs [data-baseweb="tab"], label, input, textarea, select, button {
+            font-family: Arial, Helvetica, sans-serif !important;
+        }
+
+        .block-container {
+            padding-top: 1.1rem;
+            padding-bottom: 2.0rem;
+        }
+
+        h1, h2, h3 {
+            font-family: Arial, Helvetica, sans-serif !important;
+            color: #1f2937;
+            letter-spacing: -0.01em;
+        }
+
+        div[data-testid="stMetric"] {
+            background: #f8fafc;
+            border: 1px solid #d9e2ec;
+            border-radius: 12px;
+            padding: 0.70rem 0.90rem;
+        }
+
+        [data-testid="stMetricLabel"] {
+            font-weight: 600;
+            color: #4b5563;
+        }
+
+        [data-testid="stMetricValue"] {
+            color: #111827;
+        }
+
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.35rem;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 10px 10px 0 0;
+            padding-left: 0.8rem;
+            padding-right: 0.8rem;
+        }
+
+        div[data-testid="stDataEditor"], div[data-testid="stDataFrame"] {
+            border: 1px solid #d9e2ec;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        div[data-testid="stExpander"] details {
+            border: 1px solid #d9e2ec;
+            border-radius: 12px;
+            background: #ffffff;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def default_walls() -> pd.DataFrame:
     return pd.DataFrame([
         {"Wall Name": "X1", "Direction": "X", "x (m)": 5.0,  "y (m)": 0.0,  "k (kN/m)": 10000.0, "Wall Length (m)": 8.0, "Local X Force (kN)": 0.0, "Local Y Force (kN)": 0.0},
@@ -363,29 +428,89 @@ def default_walls() -> pd.DataFrame:
 
 def draw_plan(walls: pd.DataFrame, Lx: float, Ly: float, props: Dict[str, float]):
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Rectangle
 
-    fig, ax = plt.subplots(figsize=(8.0, 5.3))
-    ax.plot([0, Lx, Lx, 0, 0], [0, 0, Ly, Ly, 0], linewidth=1.5)
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Arial", "Helvetica", "Liberation Sans", "DejaVu Sans"]
 
-    # Wall symbols are short line segments centered at their input coordinates.
-    symbol_len = 0.08 * max(Lx, Ly)
+    fig, ax = plt.subplots(figsize=(10.0, 6.2))
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("#fcfdff")
+
+    # Plan outline
+    outline = Rectangle((0.0, 0.0), Lx, Ly, fill=False, edgecolor="#334155", linewidth=1.8)
+    ax.add_patch(outline)
+
+    wall_colors = {"X": "#1d4ed8", "Y": "#b45309"}
+    text_offset_x = 0.012 * max(Lx, 1.0)
+    text_offset_y = 0.018 * max(Ly, 1.0)
+
     for _, r in walls.iterrows():
-        x, y = r["x (m)"], r["y (m)"]
-        if r["Direction"] == "X":
-            ax.plot([x - symbol_len / 2, x + symbol_len / 2], [y, y], linewidth=4)
-        else:
-            ax.plot([x, x], [y - symbol_len / 2, y + symbol_len / 2], linewidth=4)
-        ax.text(x, y, f" {r['Wall Name']}", fontsize=9, va="bottom")
+        x = float(r["x (m)"])
+        y = float(r["y (m)"])
+        length = float(r["Wall Length (m)"])
+        direction = str(r["Direction"])
+        color = wall_colors.get(direction, "#374151")
 
-    ax.scatter([props["Xcm"]], [props["Ycm"]], marker="o", s=60, label="CM")
-    ax.scatter([props["Xcr"]], [props["Ycr"]], marker="x", s=80, label="CR")
-    ax.set_xlim(-0.05 * Lx, 1.05 * Lx)
-    ax.set_ylim(-0.08 * Ly, 1.08 * Ly)
+        if direction == "X":
+            x0 = max(0.0, x - length / 2.0)
+            x1 = min(Lx, x + length / 2.0)
+            ax.plot([x0, x1], [y, y], color=color, linewidth=5.0, solid_capstyle="butt", zorder=3)
+            ax.plot(x, y, marker="o", color=color, markersize=3.5, zorder=4)
+            label_y = y + text_offset_y
+            ha, va = "center", "bottom"
+        else:
+            y0 = max(0.0, y - length / 2.0)
+            y1 = min(Ly, y + length / 2.0)
+            ax.plot([x, x], [y0, y1], color=color, linewidth=5.0, solid_capstyle="butt", zorder=3)
+            ax.plot(x, y, marker="o", color=color, markersize=3.5, zorder=4)
+            label_y = y + text_offset_y
+            ha, va = "left", "bottom"
+
+        label = f"{r['Wall Name']} ({direction})\nL={length:.2f} m"
+        ax.text(
+            x + (text_offset_x if direction == "Y" else 0.0),
+            label_y,
+            label,
+            fontsize=9,
+            ha=ha,
+            va=va,
+            color="#111827",
+            bbox=dict(boxstyle="round,pad=0.20", facecolor="white", edgecolor="none", alpha=0.85),
+            zorder=5,
+        )
+
+    # CM and CR
+    ax.scatter([props["Xcm"]], [props["Ycm"]], marker="o", s=70, color="#16a34a", zorder=6)
+    ax.scatter([props["Xcr"]], [props["Ycr"]], marker="X", s=95, color="#dc2626", zorder=6)
+    ax.text(props["Xcm"] + text_offset_x, props["Ycm"] + text_offset_y, "CM", color="#166534", fontsize=10, weight="bold")
+    ax.text(props["Xcr"] + text_offset_x, props["Ycr"] - text_offset_y, "CR", color="#991b1b", fontsize=10, weight="bold")
+
+    # Eccentricity guide from CR to CM
+    ax.annotate(
+        "",
+        xy=(props["Xcm"], props["Ycm"]),
+        xytext=(props["Xcr"], props["Ycr"]),
+        arrowprops=dict(arrowstyle="->", linestyle="--", linewidth=1.4, color="#64748b"),
+        zorder=2,
+    )
+
+    ax.set_xlim(-0.06 * Lx, 1.06 * Lx)
+    ax.set_ylim(-0.10 * Ly, 1.12 * Ly)
     ax.set_aspect("equal", adjustable="box")
-    ax.set_xlabel("X / E-W (m)")
-    ax.set_ylabel("Y / N-S (m)")
-    ax.grid(True, alpha=0.2)
-    ax.legend(loc="best")
+    ax.set_xlabel("X / E-W (m)", fontsize=10)
+    ax.set_ylabel("Y / N-S (m)", fontsize=10)
+    ax.set_title("Plan layout, wall locations, wall lengths, CM and CR", fontsize=12, weight="bold", pad=10)
+    ax.grid(True, color="#cbd5e1", linewidth=0.6, alpha=0.6)
+
+    legend_handles = [
+        Line2D([0], [0], color=wall_colors["X"], linewidth=5.0, label="X-direction wall"),
+        Line2D([0], [0], color=wall_colors["Y"], linewidth=5.0, label="Y-direction wall"),
+        Line2D([0], [0], marker="o", linestyle="", color="#16a34a", markersize=8, label="Center of mass (CM)"),
+        Line2D([0], [0], marker="X", linestyle="", color="#dc2626", markersize=8, label="Center of rigidity (CR)"),
+    ]
+    ax.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2, frameon=False)
     fig.tight_layout()
     return fig
 
@@ -451,6 +576,7 @@ def run_sweep(
 # -----------------------------------------------------------------------------
 def main() -> None:
     st.set_page_config(page_title="Rigid Diaphragm Parametric Analysis", layout="wide")
+    inject_professional_css()
     st.title("Rigid Diaphragm Parametric Analysis")
     st.caption("Stiffness-based force distribution with signed natural eccentricity, ± accidental eccentricity, torsion to all resisting lines, and equilibrium checks.")
 
@@ -507,7 +633,10 @@ For each X or Y load direction it computes the center of rigidity, the torsional
     Fx = r2[0].number_input("Fx — diaphragm force in X (kN)", value=d_Fx, step=1.0)
     Fy = r2[1].number_input("Fy — diaphragm force in Y (kN)", value=d_Fy, step=1.0)
     acc = r2[2].number_input("Accidental eccentricity ratio", min_value=0.0, value=d_acc, step=0.01, format="%.3f")
-    r2[3].metric("Accidental offsets", f"X-load: ±{acc*Ly:.3f} m | Y-load: ±{acc*Lx:.3f} m")
+    with r2[3]:
+        st.markdown("**Accidental offsets**")
+        st.caption(f"X-load offset = ±{acc*Ly:.3f} m")
+        st.caption(f"Y-load offset = ±{acc*Lx:.3f} m")
 
     st.subheader("2. Wall / frame table")
     st.caption("Direction X = E-W wall resisting X force; Direction Y = N-S wall resisting Y force. Coordinates locate the resisting line. k is lateral stiffness in kN/m. Optional local wall forces are loads resisted directly by that wall (e.g., its own inertial wall weight) and are added after diaphragm distribution.")
@@ -566,7 +695,18 @@ For each X or Y load direction it computes the center of rigidity, the torsional
 
     with tabs[1]:
         props_df = result["wall_properties"].copy()
-        st.pyplot(draw_plan(props_df, Lx, Ly, p), clear_figure=True)
+        try:
+            fig = draw_plan(props_df, Lx, Ly, p)
+            st.pyplot(fig, clear_figure=True)
+        except ModuleNotFoundError as exc:
+            if exc.name == "matplotlib":
+                st.warning(
+                    "Plan graphic requires matplotlib. On Streamlit Cloud, make sure the repository contains "
+                    "a file named exactly `requirements.txt` with `matplotlib>=3.7`, then reboot the app. "
+                    "The engineering calculations and tables below are still available."
+                )
+            else:
+                raise
         st.dataframe(
             props_df[["Wall Name", "Direction", "x (m)", "y (m)", "k (kN/m)", "xbar (m)", "ybar (m)", "ky*xbar^2 (kN·m)", "kx*ybar^2 (kN·m)"]].round(3),
             hide_index=True,
