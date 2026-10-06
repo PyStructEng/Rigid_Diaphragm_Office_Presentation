@@ -75,6 +75,9 @@ def draw_plan_with_forces(
     envelope: pd.DataFrame,
     load_direction: str,
     show_forces: bool = True,
+    selected_wall: str | None = None,
+    case_label: str = "governing envelope",
+    figsize: tuple[float, float] = (10.6, 6.4),
 ):
     plt = _mpl()
     from matplotlib.lines import Line2D
@@ -87,7 +90,7 @@ def draw_plan_with_forces(
     abs_col = f"{d}-load envelope |V| (kN)"
     max_force = max(float(env[abs_col].max()), 1e-9)
 
-    fig, ax = plt.subplots(figsize=(10.6, 6.4))
+    fig, ax = plt.subplots(figsize=figsize)
     fig.patch.set_facecolor("white")
     ax.set_facecolor("#fcfdff")
     ax.add_patch(Rectangle((0, 0), Lx, Ly, fill=False, edgecolor="#334155", linewidth=1.8))
@@ -103,14 +106,16 @@ def draw_plan_with_forces(
         length = float(r["Wall Length (m)"])
         stiffness = float(r["k (kN/m)"])
         color = wall_colors[direction]
+        is_selected = selected_wall is not None and name == selected_wall
+        wall_lw = 8.0 if is_selected else 5.0
 
         # Actual wall length, centered on the resisting-line coordinate and clipped to plan.
         if direction == "X":
             x0, x1 = max(0.0, x - length / 2), min(Lx, x + length / 2)
-            ax.plot([x0, x1], [y, y], linewidth=5.0, color=color, solid_capstyle="butt", zorder=3)
+            ax.plot([x0, x1], [y, y], linewidth=wall_lw, color=color, solid_capstyle="butt", zorder=3)
         else:
             y0, y1 = max(0.0, y - length / 2), min(Ly, y + length / 2)
-            ax.plot([x, x], [y0, y1], linewidth=5.0, color=color, solid_capstyle="butt", zorder=3)
+            ax.plot([x, x], [y0, y1], linewidth=wall_lw, color=color, solid_capstyle="butt", zorder=3)
         ax.plot(x, y, marker="o", markersize=3.5, color=color, zorder=4)
 
         V = float(env.loc[name, signed_col]) if name in env.index else 0.0
@@ -155,7 +160,7 @@ def draw_plan_with_forces(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("X / E-W (m)")
     ax.set_ylabel("Y / N-S (m)")
-    ax.set_title(f"Rigid diaphragm - governing {d}-load wall forces", fontsize=12, weight="bold", pad=10)
+    ax.set_title(f"Rigid diaphragm - {d}-load {case_label}", fontsize=12, weight="bold", pad=10)
     ax.grid(True, linewidth=0.6, color="#cbd5e1", alpha=0.55)
     handles = [
         Line2D([0], [0], color=wall_colors["X"], linewidth=5, label="X-direction wall"),
@@ -184,6 +189,96 @@ def draw_force_bars(envelope: pd.DataFrame, load_direction: str):
         ax.text(i, v, f"{v:.1f}", ha="center", va="bottom" if v >= 0 else "top", fontsize=9)
     fig.tight_layout()
     return fig
+
+
+def force_table_for_view(result: Dict[str, object], load_direction: str, case_mode: str) -> tuple[pd.DataFrame, str]:
+    """Return a force table shaped like the envelope table for visualization.
+
+    Envelope mode is a wall-by-wall design envelope and is not necessarily one
+    simultaneous physical load case.  The +/- modes show one actual accidental-
+    eccentricity case at a time.
+    """
+    d = load_direction.upper()
+    env = result["envelope"].copy()
+    signed_col = f"{d}-load governing signed V (kN)"
+    abs_col = f"{d}-load envelope |V| (kN)"
+    acc_col = f"{d}-load acc. sign"
+
+    if case_mode.startswith("Envelope"):
+        return env, "wall-by-wall design envelope"
+
+    sign = "+" if case_mode.startswith("+") else "−"
+    cases = result["x_cases"] if d == "X" else result["y_cases"]
+    c = cases.loc[cases["Accidental Sign"].eq(sign), ["Wall Name", "Wall-parallel V (kN)"]].copy()
+    c = c.drop_duplicates(subset=["Wall Name"]).set_index("Wall Name")
+    for idx, row in env.iterrows():
+        name = row["Wall Name"]
+        if name in c.index:
+            v = float(c.loc[name, "Wall-parallel V (kN)"])
+            env.at[idx, signed_col] = v
+            env.at[idx, abs_col] = abs(v)
+            env.at[idx, acc_col] = sign
+    return env, f"{sign} accidental-eccentricity case"
+
+
+def render_model_snapshot(
+    walls: pd.DataFrame,
+    settings: Dict[str, float],
+    result: Dict[str, object],
+    load_direction: str,
+    case_mode: str = "Envelope (wall-by-wall)",
+    selected_wall: str | None = None,
+    heading: str | None = None,
+    show_force_bars: bool = False,
+    compact: bool = True,
+) -> None:
+    """Reusable visual anchor used globally and inside study tabs."""
+    if heading:
+        st.markdown(f"#### {heading}")
+    view_table, case_label = force_table_for_view(result, load_direction, case_mode)
+    props = result["properties"]
+
+    if show_force_bars:
+        left, right = st.columns([1.55, 1.0])
+        with left:
+            st.pyplot(
+                draw_plan_with_forces(
+                    walls, settings["Lx"], settings["Ly"], props, view_table, load_direction,
+                    selected_wall=selected_wall, case_label=case_label,
+                    figsize=(9.4, 5.5) if compact else (10.6, 6.4),
+                ),
+                clear_figure=True, use_container_width=True,
+            )
+        with right:
+            st.pyplot(draw_force_bars(view_table, load_direction), clear_figure=True, use_container_width=True)
+            a, b = st.columns(2)
+            a.metric("CR", f"({props['Xcr']:.2f}, {props['Ycr']:.2f}) m")
+            b.metric("J", f"{props['J']:,.0f} kN·m")
+            c, d = st.columns(2)
+            c.metric("ex", f"{props['ex_signed']:.3f} m")
+            d.metric("ey", f"{props['ey_signed']:.3f} m")
+    else:
+        left, right = st.columns([1.75, 0.85])
+        with left:
+            st.pyplot(
+                draw_plan_with_forces(
+                    walls, settings["Lx"], settings["Ly"], props, view_table, load_direction,
+                    selected_wall=selected_wall, case_label=case_label, figsize=(8.5, 4.8),
+                ),
+                clear_figure=True, use_container_width=True,
+            )
+        with right:
+            st.metric("Xcr", f"{props['Xcr']:.3f} m")
+            st.metric("Ycr", f"{props['Ycr']:.3f} m")
+            st.metric("J", f"{props['J']:,.0f} kN·m")
+            if selected_wall:
+                row = view_table.loc[view_table["Wall Name"].eq(selected_wall)]
+                if not row.empty:
+                    col = f"{load_direction.upper()}-load governing signed V (kN)"
+                    st.metric(f"{selected_wall} force", f"{float(row.iloc[0][col]):+.2f} kN")
+
+    if case_mode.startswith("Envelope"):
+        st.caption("Wall-by-wall envelope: individual maxima can come from different ± accidental-eccentricity cases and are not necessarily simultaneous.")
 
 
 def draw_line_chart(df: pd.DataFrame, x: str, ys: list[str], title: str, xlabel: str | None = None, ylabel: str | None = None, log_x: bool = False):
@@ -373,7 +468,7 @@ def main() -> None:
     d_Xcm = float(fp.get("Xcm", d_Lx/2)); d_Ycm = float(fp.get("Ycm", d_Ly/2))
     d_Fx = float(fp.get("Fx", 100.0)); d_Fy = float(fp.get("Fy", 100.0)); d_acc = float(fp.get("acc", 0.10))
 
-    with st.expander("System model inputs", expanded=True):
+    with st.expander("System model inputs", expanded=False):
         st.subheader("1. Diaphragm and load inputs")
         r1 = st.columns(4)
         Lx = r1[0].number_input("Lx - X/E-W plan dimension (m)", min_value=0.01, value=d_Lx, step=0.1)
@@ -423,6 +518,29 @@ def main() -> None:
     m5.metric("J", f"{p['J']:,.0f} kN·m")
     m6.metric("Σk", f"X {p['sum_kx']:,.0f} | Y {p['sum_ky']:,.0f}")
 
+    # ------------------------------------------------------------------
+    # Persistent model visualization - stays above every study tab
+    # ------------------------------------------------------------------
+    st.markdown("## Current system visualization")
+    vc1, vc2, vc3 = st.columns([1.0, 1.35, 2.65])
+    global_load_dir = vc1.radio("Load direction", ["X", "Y"], horizontal=True, key="global_load_dir")
+    global_case_mode = vc2.selectbox(
+        "Force view",
+        ["Envelope (wall-by-wall)", "+ accidental eccentricity", "− accidental eccentricity"],
+        key="global_case_mode",
+    )
+    with vc3:
+        if global_case_mode.startswith("Envelope"):
+            st.info("Envelope view is for design comparison. Wall maxima may come from different ± accidental-eccentricity cases and are not necessarily simultaneous.")
+        else:
+            st.success("Single load-case view: all wall forces shown are simultaneous for the selected accidental-eccentricity sign.")
+
+    render_model_snapshot(
+        clean_walls, settings, result, global_load_dir, global_case_mode,
+        heading=None, show_force_bars=True, compact=False,
+    )
+    st.divider()
+
     tabs = st.tabs([
         "Presentation",
         "Geometry study",
@@ -439,17 +557,17 @@ def main() -> None:
     # Presentation
     # ------------------------------------------------------------------
     with tabs[0]:
-        st.subheader("Presentation mode")
-        load_dir = st.radio("Show governing force envelope for", ["X", "Y"], horizontal=True, key="presentation_load_dir")
-        c1, c2 = st.columns([1.55, 1.0])
-        with c1:
-            st.pyplot(draw_plan_with_forces(clean_walls, Lx, Ly, p, result["envelope"], load_dir), clear_figure=True, use_container_width=True)
-        with c2:
-            st.pyplot(draw_force_bars(result["envelope"], load_dir), clear_figure=True, use_container_width=True)
-            st.markdown(
-                '<div class="hero-note"><b>Presentation tip:</b> change one variable at a time in the System Model. Wall length changes the drawn wall immediately. With k held fixed, the distributed force should not change only because the wall is longer; unit shear V/L does.</div>',
-                unsafe_allow_html=True,
-            )
+        st.subheader("Model overview")
+        st.caption("The same current-system visualization is kept at the top of the app so the structural context never disappears while moving between studies.")
+        render_model_snapshot(
+            clean_walls, settings, result, global_load_dir, global_case_mode,
+            heading="Current wall layout", show_force_bars=False, compact=True,
+        )
+        st.markdown(
+            '<div class="hero-note"><b>Presentation workflow:</b> change one variable at a time. Use a single ± accidental-eccentricity case when you want to show a simultaneous force state; use the envelope only for wall-by-wall design comparison.</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("### Current wall-force results")
         env = result["envelope"].copy()
         st.dataframe(env.round(3), hide_index=True, use_container_width=True)
 
@@ -466,6 +584,34 @@ def main() -> None:
         g4, g5 = st.columns(2)
         g_start = g4.number_input("Start normalized position", min_value=0.0, max_value=1.0, value=0.0, step=0.05, key="geo_start")
         g_stop = g5.number_input("Stop normalized position", min_value=0.0, max_value=1.0, value=1.0, step=0.05, key="geo_stop")
+
+        # Live geometry preview - this is intentionally separate from the batch sweep.
+        grow = clean_walls.loc[clean_walls["Wall Name"].eq(g_wall)].iloc[0]
+        if grow["Direction"] == "X":
+            current_gpos = float(grow["y (m)"]) / Ly if Ly else 0.0
+            move_dim = Ly
+        else:
+            current_gpos = float(grow["x (m)"]) / Lx if Lx else 0.0
+            move_dim = Lx
+        current_gpos = float(np.clip(current_gpos, 0.0, 1.0))
+        g_preview_pos = st.slider(
+            "Live preview - normalized wall position", 0.0, 1.0, current_gpos, 0.01, key="geo_preview_pos"
+        )
+        geo_preview_walls = clean_walls.copy()
+        gmask = geo_preview_walls["Wall Name"].eq(g_wall)
+        if grow["Direction"] == "X":
+            geo_preview_walls.loc[gmask, "y (m)"] = g_preview_pos * move_dim
+        else:
+            geo_preview_walls.loc[gmask, "x (m)"] = g_preview_pos * move_dim
+        try:
+            geo_preview_result = analyze_model(geo_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+            render_model_snapshot(
+                geo_preview_walls, settings, geo_preview_result, g_load, global_case_mode,
+                selected_wall=g_wall, heading="Live geometry preview", show_force_bars=False, compact=True,
+            )
+        except Exception as exc:
+            st.warning(f"Preview unavailable at this position: {exc}")
+
         if st.button("Run geometry study", type="primary", key="run_geo"):
             st.session_state.geo_df = run_geometry_study(clean_walls, settings, g_wall, g_load, int(g_points), g_start, g_stop)
         if "geo_df" in st.session_state:
@@ -491,6 +637,21 @@ def main() -> None:
         s4, s5 = st.columns(2)
         s_start = s4.number_input("Minimum k/k₀", min_value=0.01, value=0.25, step=0.05, key="stiff_start")
         s_stop = s5.number_input("Maximum k/k₀", min_value=0.02, value=4.0, step=0.25, key="stiff_stop")
+
+        s_preview_mult = st.slider("Live preview - stiffness multiplier k/k₀", 0.10, 5.00, 1.00, 0.05, key="stiff_preview_mult")
+        stiff_preview_walls = clean_walls.copy()
+        smask = stiff_preview_walls["Wall Name"].eq(s_wall)
+        base_k_preview = float(clean_walls.loc[clean_walls["Wall Name"].eq(s_wall), "k (kN/m)"].iloc[0])
+        stiff_preview_walls.loc[smask, "k (kN/m)"] = base_k_preview * s_preview_mult
+        try:
+            stiff_preview_result = analyze_model(stiff_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+            render_model_snapshot(
+                stiff_preview_walls, settings, stiff_preview_result, s_load, global_case_mode,
+                selected_wall=s_wall, heading="Live stiffness preview", show_force_bars=False, compact=True,
+            )
+        except Exception as exc:
+            st.warning(f"Preview unavailable at this stiffness: {exc}")
+
         if st.button("Run stiffness study", type="primary", key="run_stiff"):
             st.session_state.stiff_df = run_stiffness_study(clean_walls, settings, s_wall, s_load, int(s_points), s_start, s_stop, True)
         if "stiff_df" in st.session_state:
@@ -524,6 +685,23 @@ def main() -> None:
         fixed_tab, calc_tab = st.tabs(["A - Length only, k fixed", "B - Length changes calculated k"])
         with fixed_tab:
             st.caption("This deliberately isolates wall length from stiffness. It is a mechanics check and a useful presentation demonstration.")
+            fixed_preview_default = float(np.clip(float(row["Wall Length (m)"]), 0.05, max(0.05, plan_limit)))
+            fixed_preview_L = st.slider(
+                "Live preview - wall length with k held fixed (m)",
+                0.05, 100.0, fixed_preview_default, 0.05, key="length_fixed_preview_L"
+            )
+            fixed_preview_walls = clean_walls.copy()
+            lmask = fixed_preview_walls["Wall Name"].eq(l_wall)
+            fixed_preview_walls.loc[lmask, "Wall Length (m)"] = fixed_preview_L
+            try:
+                fixed_preview_result = analyze_model(fixed_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                render_model_snapshot(
+                    fixed_preview_walls, settings, fixed_preview_result, l_load, global_case_mode,
+                    selected_wall=l_wall, heading="Live length preview - fixed stiffness", show_force_bars=False, compact=True,
+                )
+            except Exception as exc:
+                st.warning(f"Preview unavailable at this wall length: {exc}")
+
             if st.button("Run fixed-k length study", type="primary", key="run_length_fixed"):
                 st.session_state.length_fixed_df = run_length_fixed_k_study(clean_walls, settings, l_wall, l_load, L_start, L_stop, int(L_points))
             if "length_fixed_df" in st.session_state:
@@ -538,6 +716,31 @@ def main() -> None:
         with calc_tab:
             st.caption("Uses the FPInnovations-example wall-stiffness equation with your current Wood Wall Lab inputs. Bv, en and anchorage data must be verified for the intended design basis.")
             st.info("The current Wood Wall Lab property values are used here. Adjust them in the Wood Wall Lab tab, then return and rerun this study.")
+            calc_preview_default = float(np.clip(float(row["Wall Length (m)"]), 0.05, max(0.05, plan_limit)))
+            calc_preview_L = st.slider(
+                "Live preview - wall length with calculated wood-wall k (m)",
+                0.05, 100.0, calc_preview_default, 0.05, key="length_calc_preview_L"
+            )
+            calc_preview_walls = clean_walls.copy()
+            lmask2 = calc_preview_walls["Wall Name"].eq(l_wall)
+            calc_preview_walls.loc[lmask2, "Wall Length (m)"] = calc_preview_L
+            try:
+                seed_result = analyze_model(calc_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                seed_env = seed_result["envelope"].set_index("Wall Name")
+                seed_col = f"{l_load.upper()}-load envelope |V| (kN)"
+                seed_V = float(seed_env.loc[l_wall, seed_col])
+                wp_preview = current_wood_params(V_override=seed_V, L_override=calc_preview_L)
+                wr_preview = wood_wall_response(**wp_preview)
+                calc_preview_walls.loc[lmask2, "k (kN/m)"] = wr_preview["k secant (kN/m)"]
+                calc_preview_result = analyze_model(calc_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                st.caption(f"Calculated preview stiffness for {l_wall}: {wr_preview['k secant (kN/m)']:,.0f} kN/m using seed wall force {seed_V:.2f} kN.")
+                render_model_snapshot(
+                    calc_preview_walls, settings, calc_preview_result, l_load, global_case_mode,
+                    selected_wall=l_wall, heading="Live length preview - calculated stiffness", show_force_bars=False, compact=True,
+                )
+            except Exception as exc:
+                st.warning(f"Calculated-k preview unavailable: {exc}")
+
             if st.button("Run length + calculated-k study", type="primary", key="run_length_calc"):
                 wp = current_wood_params()
                 st.session_state.length_calc_df = run_length_calculated_k_building_study(clean_walls, settings, l_wall, l_load, L_start, L_stop, int(L_points), wp, True)
@@ -562,6 +765,27 @@ def main() -> None:
         h4, h5 = st.columns(2)
         h_kmin = h4.number_input("Minimum k/k₀", min_value=0.01, value=0.25, step=0.05, key="heat_kmin")
         h_kmax = h5.number_input("Maximum k/k₀", min_value=0.02, value=4.0, step=0.25, key="heat_kmax")
+
+        hp1, hp2 = st.columns(2)
+        h_preview_pos = hp1.slider("Live preview - normalized position", 0.0, 1.0, 0.50, 0.01, key="heat_preview_pos")
+        h_preview_mult = hp2.slider("Live preview - stiffness multiplier k/k₀", 0.10, 5.00, 1.00, 0.05, key="heat_preview_mult")
+        heat_preview_walls = clean_walls.copy()
+        hmask = heat_preview_walls["Wall Name"].eq(h_wall)
+        hrow = clean_walls.loc[clean_walls["Wall Name"].eq(h_wall)].iloc[0]
+        if hrow["Direction"] == "X":
+            heat_preview_walls.loc[hmask, "y (m)"] = h_preview_pos * Ly
+        else:
+            heat_preview_walls.loc[hmask, "x (m)"] = h_preview_pos * Lx
+        heat_preview_walls.loc[hmask, "k (kN/m)"] = float(hrow["k (kN/m)"]) * h_preview_mult
+        try:
+            heat_preview_result = analyze_model(heat_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+            render_model_snapshot(
+                heat_preview_walls, settings, heat_preview_result, h_load, global_case_mode,
+                selected_wall=h_wall, heading="Live interaction preview", show_force_bars=False, compact=True,
+            )
+        except Exception as exc:
+            st.warning(f"Interaction preview unavailable: {exc}")
+
         st.caption(f"This grid will solve approximately {int(grid_n)**2:,} rigid-diaphragm models.")
         if st.button("Run interaction study", type="primary", key="run_heat"):
             with st.spinner(f"Running {int(grid_n)**2:,} cases..."):
@@ -598,6 +822,10 @@ def main() -> None:
         b_lmax = max(b_lmin + 0.1, min(limit, float(brow["Wall Length (m)"]) * 1.5))
         total_est = n_curve * 3 + n_grid**2
         st.info(f"Planned run count: approximately {total_est:,} analyses.")
+        render_model_snapshot(
+            clean_walls, settings, result, b_load, global_case_mode,
+            selected_wall=b_wall, heading="Research model being sampled", show_force_bars=False, compact=True,
+        )
         if st.button("Run core research suite", type="primary", key="run_batch"):
             with st.spinner(f"Running ~{total_est:,} models..."):
                 suite = {}
@@ -621,12 +849,28 @@ def main() -> None:
     with tabs[6]:
         st.subheader("Wood Wall Laboratory")
         st.caption("Implements the wall-stiffness equation printed in the uploaded FPInnovations example. This V1 intentionally does not embed CSA O86 tables: enter verified Bv, en and anchorage properties for your chosen design basis.")
+        wv1, wv2 = st.columns(2)
+        wood_preview_wall = wv1.selectbox("Building wall linked to the laboratory", clean_walls["Wall Name"].tolist(), key="wood_preview_wall")
+        wood_preview_load = wv2.selectbox("Load direction for building preview", ["X", "Y"], key="wood_preview_load")
         wp, auto_hd, hd_cap, hd_def = wood_input_panel("lab")
         if auto_hd:
             hd = linearized_holdown_da_mm(wp["V_kN"], wp["H_m"], wp["L_m"], hd_cap, hd_def)
             wp["da_mm"] = hd["da (mm)"]
         wr = wood_wall_response(**wp)
         force_per_nail = wr["v (kN/m = N/mm)"] * float(st.session_state.wood_spacing)
+
+        wood_preview_walls = clean_walls.copy()
+        wmask = wood_preview_walls["Wall Name"].eq(wood_preview_wall)
+        wood_preview_walls.loc[wmask, "k (kN/m)"] = wr["k secant (kN/m)"]
+        try:
+            wood_preview_result = analyze_model(wood_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+            render_model_snapshot(
+                wood_preview_walls, settings, wood_preview_result, wood_preview_load, global_case_mode,
+                selected_wall=wood_preview_wall, heading="Building preview using calculated wood-wall stiffness",
+                show_force_bars=False, compact=True,
+            )
+        except Exception as exc:
+            st.warning(f"Building preview unavailable: {exc}")
 
         q1, q2, q3, q4 = st.columns(4)
         q1.metric("Secant stiffness k", f"{wr['k secant (kN/m)']:,.0f} kN/m")
@@ -681,12 +925,12 @@ def main() -> None:
 
         st.markdown("### Send this wall stiffness to the building")
         ap1, ap2 = st.columns([1.2, 1.0])
-        apply_wall = ap1.selectbox("Assign calculated k to", clean_walls["Wall Name"].tolist(), key="apply_wood_wall")
-        if ap2.button("Apply k to selected wall", type="primary", use_container_width=True):
+        ap1.info(f"Target wall: {wood_preview_wall} | calculated k = {wr['k secant (kN/m)']:,.0f} kN/m")
+        if ap2.button("Apply calculated k to linked wall", type="primary", use_container_width=True):
             new_walls = st.session_state.walls.copy()
-            new_walls.loc[new_walls["Wall Name"].eq(apply_wall), "k (kN/m)"] = wr["k secant (kN/m)"]
+            new_walls.loc[new_walls["Wall Name"].eq(wood_preview_wall), "k (kN/m)"] = wr["k secant (kN/m)"]
             st.session_state.walls = new_walls
-            st.success(f"Assigned k = {wr['k secant (kN/m)']:,.0f} kN/m to {apply_wall}.")
+            st.success(f"Assigned k = {wr['k secant (kN/m)']:,.0f} kN/m to {wood_preview_wall}.")
             st.rerun()
 
     # ------------------------------------------------------------------
@@ -702,6 +946,10 @@ def main() -> None:
         c_relax = ci4.number_input("Relaxation factor", min_value=0.05, max_value=1.0, value=0.7, step=0.05, key="coupled_relax")
         cmax = st.number_input("Maximum iterations", min_value=2, max_value=100, value=30, step=1, key="coupled_max")
         st.info("The selected wall uses the current Wood Wall Lab properties. Its wall length is taken from the building wall table; all other wood properties come from the lab.")
+        render_model_snapshot(
+            clean_walls, settings, result, c_load, global_case_mode,
+            selected_wall=c_wall, heading="Current model before coupled iteration", show_force_bars=False, compact=True,
+        )
         if st.button("Run coupled iteration", type="primary", key="run_coupled"):
             cw = current_wood_params()
             cw["L_m"] = float(clean_walls.loc[clean_walls["Wall Name"].eq(c_wall), "Wall Length (m)"].iloc[0])
@@ -723,6 +971,15 @@ def main() -> None:
             with b:
                 st.pyplot(draw_line_chart(hist, "Iteration", ["Wall force |V| (kN)"], "Wall-force convergence", "Iteration", "Force (kN)"), clear_figure=True)
             st.dataframe(hist.round(6), hide_index=True, use_container_width=True)
+            try:
+                final_preview_walls = st.session_state.coupled_final_walls.copy()
+                final_preview_result = analyze_model(final_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                render_model_snapshot(
+                    final_preview_walls, settings, final_preview_result, c_load, global_case_mode,
+                    selected_wall=c_wall, heading="Converged coupled model preview", show_force_bars=False, compact=True,
+                )
+            except Exception as exc:
+                st.warning(f"Converged-model preview unavailable: {exc}")
             if st.button("Use converged wall model in main system", key="apply_coupled"):
                 st.session_state.walls = st.session_state.coupled_final_walls.copy()
                 st.rerun()
@@ -732,6 +989,10 @@ def main() -> None:
     # ------------------------------------------------------------------
     with tabs[8]:
         st.subheader("Verification, regression checks and exports")
+        render_model_snapshot(
+            clean_walls, settings, result, global_load_dir, global_case_mode,
+            heading="Current model under verification", show_force_bars=False, compact=True,
+        )
         v1, v2 = st.columns(2)
         with v1:
             st.markdown("### Automated self-tests")
