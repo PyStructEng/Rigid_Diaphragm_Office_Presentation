@@ -32,6 +32,27 @@ from rigid_diaphragm_core import (
     wood_wall_response,
 )
 
+from wood_shearwall_mechanics import (
+    DATABASES,
+    SHEATHING_BV,
+    LUMBER_E,
+    TAKEUP_DEVICES,
+    ROD_GEOMETRY,
+    STUD_DEPTH_MM,
+    DEFAULT_CAVITY_MM,
+    DEFAULT_COMPRESSION_BEARING_LENGTH_MM,
+    default_storeys,
+    normalize_storeys,
+    analyze_stacked_wall,
+    transformed_section,
+    get_bv,
+    get_lumber_e,
+    get_rod_properties,
+    get_takeup,
+    calculate_lc_mm,
+    run_mechanics_self_tests,
+)
+
 
 # -----------------------------------------------------------------------------
 # Styling / plotting
@@ -336,6 +357,96 @@ def draw_deformation_breakdown(response: Dict[str, float]):
     return fig
 
 
+
+
+def draw_mechanics_breakdown(row: pd.Series | Dict[str, float]):
+    plt = _mpl()
+    labels = ["Bending", "Panel shear", "Nail slip", "Anchorage", "Lower-storey rotation"]
+    vals = [
+        float(row["Δ bending (mm)"]), float(row["Δ panel shear (mm)"]),
+        float(row["Δ nail slip (mm)"]), float(row["Δ anchorage (mm)"]),
+        float(row["Δ rotation from below (mm)"]),
+    ]
+    fig, ax = plt.subplots(figsize=(7.8, 4.5))
+    ax.barh(labels, vals, edgecolor="#334155", linewidth=0.6)
+    ax.set_xlabel("Inter-storey deflection contribution (mm)")
+    ax.set_title("Mechanics-based deflection breakdown", weight="bold")
+    ax.grid(axis="x", alpha=0.25)
+    total = sum(vals)
+    for i, v in enumerate(vals):
+        pct = 100.0 * v / total if total else 0.0
+        ax.text(v, i, f" {v:.3f} mm ({pct:.1f}%)", va="center", fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
+def draw_wood_wall_schematic(row: pd.Series, analyzed: pd.Series):
+    """Simple engineering schematic of wall length, rod, chord pack, Lc and ytr."""
+    plt = _mpl()
+    from matplotlib.patches import Rectangle
+    fig, ax = plt.subplots(figsize=(10.5, 2.7))
+    L = float(row["Wall length (m)"]) * 1000.0
+    Lc = float(analyzed["Lc (mm)"])
+    nstud = int(row["Chord studs / end"])
+    stud_w = 38.0
+    cavity = max(L - Lc - nstud * stud_w, 0.0)
+    x_rod = cavity / 2.0
+    x_comp = x_rod + Lc
+    ax.plot([0, L], [0, 0], linewidth=3, color="#64748b")
+    # Tension rod
+    ax.axvline(x_rod, ymin=0.25, ymax=0.78, linewidth=4, color="#dc2626")
+    # Compression chord pack, represented by individual studs centered on compression chord region
+    pack_start = min(L - nstud * stud_w, x_comp - (nstud * stud_w) / 2.0)
+    pack_start = max(pack_start, 0.0)
+    for j in range(nstud):
+        x0 = pack_start + j * stud_w
+        ax.add_patch(Rectangle((x0, -70), stud_w, 140, fill=False, edgecolor="#1d4ed8", linewidth=1.5))
+    ax.scatter([x_comp], [0], color="#1d4ed8", s=35, zorder=5)
+    ax.annotate("", xy=(x_comp, 110), xytext=(x_rod, 110), arrowprops=dict(arrowstyle="<->", color="#111827", linewidth=1.3))
+    ax.text((x_rod+x_comp)/2, 135, f"Lc = {Lc/1000:.3f} m", ha="center", va="bottom", fontsize=10, weight="bold")
+    ax.annotate("", xy=(L, -135), xytext=(0, -135), arrowprops=dict(arrowstyle="<->", color="#475569", linewidth=1.2))
+    ax.text(L/2, -165, f"Ls = {L/1000:.3f} m", ha="center", va="top", fontsize=10)
+    ax.text(x_rod, -95, "Tension rod", ha="center", va="top", color="#991b1b", fontsize=9)
+    ax.text(x_comp, -95, f"Compression chord\n{nstud} studs/end", ha="center", va="top", color="#1e3a8a", fontsize=9)
+    ax.text(0.01*L, 175, f"Ac = {float(analyzed['Ac (mm²)']):,.0f} mm²   |   At = {float(analyzed['At (mm²)']):,.1f} mm²   |   ytr = {float(analyzed['ytr (mm)']):,.0f} mm", fontsize=9, va="top")
+    ax.set_xlim(-0.03*L, 1.03*L)
+    ax.set_ylim(-210, 210)
+    ax.axis("off")
+    fig.tight_layout()
+    return fig
+
+
+def resize_storey_table(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    n = int(n)
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return default_storeys(n)
+    old = df.copy().reset_index(drop=True)
+    if len(old) >= n:
+        out = old.iloc[:n].copy()
+    else:
+        add = default_storeys(n - len(old))
+        # New rows should continue storey numbering; preserve neutral default loads.
+        add["Floor lateral force (kN)"] = 0.0
+        out = pd.concat([old, add], ignore_index=True)
+    out["Storey"] = np.arange(1, n + 1)
+    return out
+
+
+def single_storey_mechanics_k(storey_row: pd.Series | Dict[str, object], V_kN: float, wall_length_m: float | None = None,
+                               live_fraction: float = 0.5, cavity_mm: float = DEFAULT_CAVITY_MM,
+                               bearing_length_mm: float = DEFAULT_COMPRESSION_BEARING_LENGTH_MM) -> Dict[str, float]:
+    r = dict(storey_row)
+    r["Storey"] = 1
+    r["Floor lateral force (kN)"] = abs(float(V_kN))
+    if wall_length_m is not None:
+        r["Wall length (m)"] = float(wall_length_m)
+    out = analyze_stacked_wall(
+        pd.DataFrame([r]), include_lower_storey_rotation=True,
+        live_load_fraction_in_compression=float(live_fraction), cavity_mm=float(cavity_mm),
+        compression_bearing_length_mm=float(bearing_length_mm),
+    )["storeys"].iloc[0]
+    return out.to_dict()
+
 def to_excel_bytes(current_result: Dict[str, object], studies: Dict[str, pd.DataFrame] | None = None) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
@@ -386,6 +497,19 @@ def initialize_state() -> None:
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+    if "wood_n_storeys" not in st.session_state:
+        st.session_state.wood_n_storeys = 1
+    if "wood_storeys" not in st.session_state:
+        st.session_state.wood_storeys = default_storeys(1)
+    if "wood_include_rotation" not in st.session_state:
+        st.session_state.wood_include_rotation = True
+    if "wood_live_fraction" not in st.session_state:
+        st.session_state.wood_live_fraction = 0.5
+    if "wood_cavity_mm" not in st.session_state:
+        st.session_state.wood_cavity_mm = DEFAULT_CAVITY_MM
+    if "wood_bearing_length_mm" not in st.session_state:
+        st.session_state.wood_bearing_length_mm = DEFAULT_COMPRESSION_BEARING_LENGTH_MM
 
 
 def current_wood_params(V_override: float | None = None, L_override: float | None = None, da_override: float | None = None) -> Dict[str, float]:
@@ -444,7 +568,7 @@ def main() -> None:
     initialize_state()
 
     st.title("Rigid Diaphragm Research Lab")
-    st.caption("Interactive presentation, verified rigid-diaphragm mechanics, batch parametric studies, and a transparent wood shear-wall stiffness laboratory.")
+    st.caption("Interactive rigid-diaphragm research plus a mechanics-based stacked wood shear-wall deflection and stiffness laboratory.")
 
     top1, top2, top3 = st.columns([1.15, 1.15, 2.3])
     with top1:
@@ -714,44 +838,84 @@ def main() -> None:
                 st.dataframe(ld.round(5), hide_index=True, use_container_width=True, height=300)
 
         with calc_tab:
-            st.caption("Uses the FPInnovations-example wall-stiffness equation with your current Wood Wall Lab inputs. Bv, en and anchorage data must be verified for the intended design basis.")
-            st.info("The current Wood Wall Lab property values are used here. Adjust them in the Wood Wall Lab tab, then return and rerun this study.")
-            calc_preview_default = float(np.clip(float(row["Wall Length (m)"]), 0.05, max(0.05, plan_limit)))
-            calc_preview_L = st.slider(
-                "Live preview - wall length with calculated wood-wall k (m)",
-                0.05, 100.0, calc_preview_default, 0.05, key="length_calc_preview_L"
-            )
-            calc_preview_walls = clean_walls.copy()
-            lmask2 = calc_preview_walls["Wall Name"].eq(l_wall)
-            calc_preview_walls.loc[lmask2, "Wall Length (m)"] = calc_preview_L
-            try:
-                seed_result = analyze_model(calc_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
-                seed_env = seed_result["envelope"].set_index("Wall Name")
-                seed_col = f"{l_load.upper()}-load envelope |V| (kN)"
-                seed_V = float(seed_env.loc[l_wall, seed_col])
-                wp_preview = current_wood_params(V_override=seed_V, L_override=calc_preview_L)
-                wr_preview = wood_wall_response(**wp_preview)
-                calc_preview_walls.loc[lmask2, "k (kN/m)"] = wr_preview["k secant (kN/m)"]
-                calc_preview_result = analyze_model(calc_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
-                st.caption(f"Calculated preview stiffness for {l_wall}: {wr_preview['k secant (kN/m)']:,.0f} kN/m using seed wall force {seed_V:.2f} kN.")
-                render_model_snapshot(
-                    calc_preview_walls, settings, calc_preview_result, l_load, global_case_mode,
-                    selected_wall=l_wall, heading="Live length preview - calculated stiffness", show_force_bars=False, compact=True,
+            st.caption("Uses the mechanics-based Wood Wall Lab design to recalculate secant stiffness as wall length changes, then re-runs the rigid-diaphragm model. This controlled study is enabled for a one-storey wood-wall model so the current single-level diaphragm force maps directly to wall shear.")
+            if int(st.session_state.wood_n_storeys) != 1:
+                st.warning("Set the Wood Wall Lab to 1 storey for the automatic length → mechanics-based k → building redistribution study.")
+            else:
+                base_design = st.session_state.wood_storeys.iloc[0].to_dict()
+                calc_preview_default = float(np.clip(float(row["Wall Length (m)"]), 0.05, max(0.05, plan_limit)))
+                calc_preview_L = st.slider(
+                    "Live preview - wall length with mechanics-based k (m)",
+                    0.05, 100.0, calc_preview_default, 0.05, key="length_calc_preview_L_v3"
                 )
-            except Exception as exc:
-                st.warning(f"Calculated-k preview unavailable: {exc}")
+                calc_preview_walls = clean_walls.copy()
+                lmask2 = calc_preview_walls["Wall Name"].eq(l_wall)
+                calc_preview_walls.loc[lmask2, "Wall Length (m)"] = calc_preview_L
+                try:
+                    seed_result = analyze_model(calc_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                    seed_env = seed_result["envelope"].set_index("Wall Name")
+                    seed_col = f"{l_load.upper()}-load envelope |V| (kN)"
+                    seed_V = float(seed_env.loc[l_wall, seed_col])
+                    wr_preview = single_storey_mechanics_k(
+                        base_design, seed_V, wall_length_m=calc_preview_L,
+                        live_fraction=float(st.session_state.wood_live_fraction),
+                        cavity_mm=float(st.session_state.wood_cavity_mm),
+                        bearing_length_mm=float(st.session_state.wood_bearing_length_mm),
+                    )
+                    calc_preview_walls.loc[lmask2, "k (kN/m)"] = float(wr_preview["k secant (kN/m)"])
+                    calc_preview_result = analyze_model(calc_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                    st.caption(
+                        f"Calculated preview stiffness for {l_wall}: {float(wr_preview['k secant (kN/m)']):,.0f} kN/m "
+                        f"from seed wall force {seed_V:.2f} kN; Δ = {float(wr_preview['Δ total inter-storey (mm)']):.3f} mm."
+                    )
+                    render_model_snapshot(
+                        calc_preview_walls, settings, calc_preview_result, l_load, global_case_mode,
+                        selected_wall=l_wall, heading="Live length preview - mechanics-based stiffness", show_force_bars=False, compact=True,
+                    )
+                except Exception as exc:
+                    st.warning(f"Mechanics-based calculated-k preview unavailable: {exc}")
 
-            if st.button("Run length + calculated-k study", type="primary", key="run_length_calc"):
-                wp = current_wood_params()
-                st.session_state.length_calc_df = run_length_calculated_k_building_study(clean_walls, settings, l_wall, l_load, L_start, L_stop, int(L_points), wp, True)
-            if "length_calc_df" in st.session_state:
-                lcd = st.session_state.length_calc_df.dropna(subset=["Calculated k (kN/m)"])
-                a, b = st.columns(2)
-                with a:
-                    st.pyplot(draw_line_chart(lcd, "Wall Length (m)", ["Calculated k (kN/m)"], "Wall length vs calculated wall stiffness", "Wall length (m)", "k (kN/m)"), clear_figure=True)
-                with b:
-                    st.pyplot(draw_line_chart(lcd, "Wall Length (m)", ["Selected wall |V| (kN)", "Max wall |V| (kN)"], "Wall length vs building force distribution", "Wall length (m)", "Force (kN)"), clear_figure=True)
-                st.dataframe(lcd.round(5), hide_index=True, use_container_width=True, height=300)
+                if st.button("Run length + mechanics-based-k study", type="primary", key="run_length_calc_v3"):
+                    rows_calc = []
+                    for Lv in np.linspace(float(L_start), float(L_stop), int(L_points)):
+                        walls_case = clean_walls.copy()
+                        m = walls_case["Wall Name"].eq(l_wall)
+                        walls_case.loc[m, "Wall Length (m)"] = float(Lv)
+                        try:
+                            seed = analyze_model(walls_case, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                            seed_env = seed["envelope"].set_index("Wall Name")
+                            Vseed = float(seed_env.loc[l_wall, f"{l_load.upper()}-load envelope |V| (kN)"])
+                            wresp = single_storey_mechanics_k(
+                                base_design, Vseed, wall_length_m=float(Lv),
+                                live_fraction=float(st.session_state.wood_live_fraction),
+                                cavity_mm=float(st.session_state.wood_cavity_mm),
+                                bearing_length_mm=float(st.session_state.wood_bearing_length_mm),
+                            )
+                            kval = float(wresp["k secant (kN/m)"])
+                            walls_case.loc[m, "k (kN/m)"] = kval
+                            rr = analyze_model(walls_case, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                            ee = rr["envelope"].set_index("Wall Name")
+                            wallV = float(ee.loc[l_wall, f"{l_load.upper()}-load envelope |V| (kN)"])
+                            rows_calc.append({
+                                "Wall Length (m)": float(Lv), "Seed wall force for k (kN)": Vseed,
+                                "Calculated k (kN/m)": kval, "Δ total (mm)": float(wresp["Δ total inter-storey (mm)"]),
+                                "Selected wall |V| (kN)": wallV,
+                                "Max wall |V| (kN)": float(ee[f"{l_load.upper()}-load envelope |V| (kN)"].max()),
+                                "Xcr (m)": float(rr["properties"]["Xcr"]), "Ycr (m)": float(rr["properties"]["Ycr"]),
+                                "Lc (m)": float(wresp["Lc (mm)"])/1000.0,
+                            })
+                        except Exception as exc:
+                            rows_calc.append({"Wall Length (m)": float(Lv), "Error": str(exc)})
+                    st.session_state.length_calc_df = pd.DataFrame(rows_calc)
+                if "length_calc_df" in st.session_state:
+                    lcd = st.session_state.length_calc_df.dropna(subset=["Calculated k (kN/m)"])
+                    if not lcd.empty:
+                        a, b = st.columns(2)
+                        with a:
+                            st.pyplot(draw_line_chart(lcd, "Wall Length (m)", ["Calculated k (kN/m)"], "Wall length vs mechanics-based wall stiffness", "Wall length (m)", "k (kN/m)"), clear_figure=True)
+                        with b:
+                            st.pyplot(draw_line_chart(lcd, "Wall Length (m)", ["Selected wall |V| (kN)", "Max wall |V| (kN)"], "Wall length vs building force distribution", "Wall length (m)", "Force (kN)"), clear_figure=True)
+                        st.dataframe(lcd.round(5), hide_index=True, use_container_width=True, height=300)
 
     # ------------------------------------------------------------------
     # Interaction
@@ -844,145 +1008,328 @@ def main() -> None:
             st.download_button("Download batch research workbook", batch_xlsx, file_name="rigid_diaphragm_research_suite.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     # ------------------------------------------------------------------
-    # Wood wall lab
+    # Wood wall lab - mechanics based
     # ------------------------------------------------------------------
     with tabs[6]:
-        st.subheader("Wood Wall Laboratory")
-        st.caption("Implements the wall-stiffness equation printed in the uploaded FPInnovations example. This V1 intentionally does not embed CSA O86 tables: enter verified Bv, en and anchorage properties for your chosen design basis.")
-        wv1, wv2 = st.columns(2)
-        wood_preview_wall = wv1.selectbox("Building wall linked to the laboratory", clean_walls["Wall Name"].tolist(), key="wood_preview_wall")
-        wood_preview_load = wv2.selectbox("Load direction for building preview", ["X", "Y"], key="wood_preview_load")
-        wp, auto_hd, hd_cap, hd_def = wood_input_panel("lab")
-        if auto_hd:
-            hd = linearized_holdown_da_mm(wp["V_kN"], wp["H_m"], wp["L_m"], hd_cap, hd_def)
-            wp["da_mm"] = hd["da (mm)"]
-        wr = wood_wall_response(**wp)
-        force_per_nail = wr["v (kN/m = N/mm)"] * float(st.session_state.wood_spacing)
+        st.subheader("Mechanics-Based Wood Shear Wall Laboratory")
+        st.caption(
+            "FPInnovations stacked-wall mechanics with service-level app inputs. "
+            "The engine uses transformed continuous-rod bending stiffness, panel shear, the validated nail-slip relationship, "
+            "your validated anchorage deformation model, and rotation from storeys below only. No strength load factors are applied internally."
+        )
 
-        wood_preview_walls = clean_walls.copy()
-        wmask = wood_preview_walls["Wall Name"].eq(wood_preview_wall)
-        wood_preview_walls.loc[wmask, "k (kN/m)"] = wr["k secant (kN/m)"]
-        try:
-            wood_preview_result = analyze_model(wood_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
-            render_model_snapshot(
-                wood_preview_walls, settings, wood_preview_result, wood_preview_load, global_case_mode,
-                selected_wall=wood_preview_wall, heading="Building preview using calculated wood-wall stiffness",
-                show_force_bars=False, compact=True,
+        wood_main, wood_db, wood_method = st.tabs(["Wall analysis", "Embedded databases", "Method & validation"])
+
+        with wood_main:
+            cfg1, cfg2, cfg3, cfg4 = st.columns(4)
+            wood_preview_wall = cfg1.selectbox("Building wall linked to this lab", clean_walls["Wall Name"].tolist(), key="wood_preview_wall_v3")
+            wood_preview_load = cfg2.selectbox("Building load direction", ["X", "Y"], key="wood_preview_load_v3")
+            n_storeys = int(cfg3.number_input("Number of stacked storeys", min_value=1, max_value=12, value=int(st.session_state.wood_n_storeys), step=1, key="wood_n_storeys_ui_v3"))
+            st.session_state.wood_n_storeys = n_storeys
+            include_rot = cfg4.toggle("Include lower-storey rotation", value=bool(st.session_state.wood_include_rotation), key="wood_include_rot_ui_v3")
+            st.session_state.wood_include_rotation = bool(include_rot)
+
+            st.session_state.wood_storeys = resize_storey_table(st.session_state.wood_storeys, n_storeys)
+
+            with st.expander("Serviceability / geometry assumptions", expanded=False):
+                aa1, aa2, aa3 = st.columns(3)
+                live_fraction = aa1.number_input(
+                    "Service live-load fraction used in compression chord force",
+                    min_value=0.0, max_value=1.0, value=float(st.session_state.wood_live_fraction), step=0.05,
+                    key="wood_live_fraction_ui_v3",
+                    help="Explicit input retained from the validated spreadsheet logic; no hidden load factor is applied."
+                )
+                cavity_mm = aa2.number_input(
+                    "Symmetric rod/chord cavity allowance (mm)", min_value=0.0,
+                    value=float(st.session_state.wood_cavity_mm), step=1.0, key="wood_cavity_ui_v3",
+                    help="Used in Lc = Ls - (n_chord × 38 + cavity). Default is 9 in = 228.6 mm."
+                )
+                bearing_len = aa3.number_input(
+                    "Compression-perpendicular bearing length (mm)", min_value=1.0,
+                    value=float(st.session_state.wood_bearing_length_mm), step=1.0, key="wood_bearing_len_ui_v3",
+                    help="Existing validated script uses 3 × 38 = 114 mm."
+                )
+                st.session_state.wood_live_fraction = float(live_fraction)
+                st.session_state.wood_cavity_mm = float(cavity_mm)
+                st.session_state.wood_bearing_length_mm = float(bearing_len)
+
+            # Convenient synchronization for the common one-storey presentation / iteration case.
+            if n_storeys == 1:
+                try:
+                    current_view, current_label = force_table_for_view(result, wood_preview_load, global_case_mode)
+                    current_force = abs(float(current_view.loc[current_view["Wall Name"].eq(wood_preview_wall), f"{wood_preview_load}-load governing signed V (kN)"].iloc[0]))
+                    current_wall_length = float(clean_walls.loc[clean_walls["Wall Name"].eq(wood_preview_wall), "Wall Length (m)"].iloc[0])
+                    sync1, sync2, sync3 = st.columns([1.3, 1.0, 1.0])
+                    sync1.info(f"Current building case: {wood_preview_wall} | {current_label} | |V| = {current_force:.2f} kN | L = {current_wall_length:.2f} m")
+                    if sync2.button("Sync V from building", use_container_width=True, key="sync_wood_V_v3"):
+                        st.session_state.wood_storeys.loc[0, "Floor lateral force (kN)"] = current_force
+                        st.session_state.pop("wood_storey_editor_v3", None)
+                        st.rerun()
+                    if sync3.button("Sync V + wall length", use_container_width=True, key="sync_wood_VL_v3"):
+                        st.session_state.wood_storeys.loc[0, "Floor lateral force (kN)"] = current_force
+                        st.session_state.wood_storeys.loc[0, "Wall length (m)"] = current_wall_length
+                        st.session_state.pop("wood_storey_editor_v3", None)
+                        st.rerun()
+                except Exception as exc:
+                    st.warning(f"Could not read current building wall force for synchronization: {exc}")
+
+            panel_types = sorted(SHEATHING_BV["Panel Type"].unique().tolist())
+            panel_thicks = sorted(SHEATHING_BV["Thickness (mm)"].unique().tolist())
+            species_opts = LUMBER_E["Species"].unique().tolist()
+            grade_opts = LUMBER_E["Grade"].unique().tolist()
+            rod_opts = sorted(set(ROD_GEOMETRY["Strong Rod Standard"].tolist() + ROD_GEOMETRY["Strong Rod High Strength"].tolist()))
+            tud_opts = TAKEUP_DEVICES["Model No."].tolist()
+
+            st.markdown("### Storey inputs")
+            st.caption("Rows are ordered bottom → top. Storey 1 is the lowest storey. 'Floor lateral force' is the service-level force applied at that level; storey shear is calculated automatically as the sum of that level and all levels above.")
+            edited_storeys = st.data_editor(
+                st.session_state.wood_storeys,
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                column_config={
+                    "Storey": st.column_config.NumberColumn("Storey", disabled=True, format="%d"),
+                    "Floor lateral force (kN)": st.column_config.NumberColumn(format="%.3f", min_value=0.0),
+                    "Height (m)": st.column_config.NumberColumn(format="%.3f", min_value=0.1),
+                    "Wall length (m)": st.column_config.NumberColumn(format="%.3f", min_value=0.1),
+                    "Panel Type": st.column_config.SelectboxColumn(options=panel_types, required=True),
+                    "Panel thickness (mm)": st.column_config.SelectboxColumn(options=panel_thicks, required=True),
+                    "Panel sides": st.column_config.SelectboxColumn(options=["S.S", "B.S"], required=True),
+                    "Nail diameter (mm)": st.column_config.NumberColumn(format="%.3f", min_value=0.1),
+                    "Nail spacing (mm)": st.column_config.NumberColumn(format="%.1f", min_value=1.0),
+                    "Species": st.column_config.SelectboxColumn(options=species_opts, required=True),
+                    "Grade": st.column_config.SelectboxColumn(options=grade_opts, required=True),
+                    "Stud size": st.column_config.SelectboxColumn(options=list(STUD_DEPTH_MM.keys()), required=True),
+                    "Chord studs / end": st.column_config.NumberColumn(format="%d", min_value=1, step=1),
+                    "Rod model": st.column_config.SelectboxColumn(options=rod_opts, required=True),
+                    "Take-up device": st.column_config.SelectboxColumn(options=tud_opts, required=True),
+                    "Service dead line load (kN/m)": st.column_config.NumberColumn(format="%.3f", min_value=0.0),
+                    "Service live line load (kN/m)": st.column_config.NumberColumn(format="%.3f", min_value=0.0),
+                },
+                key="wood_storey_editor_v3",
             )
-        except Exception as exc:
-            st.warning(f"Building preview unavailable: {exc}")
+            edited_storeys["Storey"] = np.arange(1, len(edited_storeys) + 1)
+            st.session_state.wood_storeys = edited_storeys.copy()
 
-        q1, q2, q3, q4 = st.columns(4)
-        q1.metric("Secant stiffness k", f"{wr['k secant (kN/m)']:,.0f} kN/m")
-        q2.metric("Total deflection Δ", f"{wr['Δ total (mm)']:.3f} mm")
-        q3.metric("Unit shear v", f"{wr['v (kN/m = N/mm)']:.3f} kN/m")
-        q4.metric("Force / nail", f"{force_per_nail:.0f} N")
+            try:
+                wood_result = analyze_stacked_wall(
+                    edited_storeys,
+                    include_lower_storey_rotation=bool(include_rot),
+                    live_load_fraction_in_compression=float(live_fraction),
+                    cavity_mm=float(cavity_mm),
+                    compression_bearing_length_mm=float(bearing_len),
+                )
+                wood_out = wood_result["storeys"]
+                st.session_state.wood_mechanics_result = wood_out.copy()
+            except Exception as exc:
+                st.error(f"Wood-wall mechanics calculation stopped: {exc}")
+                wood_out = None
 
-        c1, c2 = st.columns([1.0, 1.15])
-        with c1:
-            st.pyplot(draw_deformation_breakdown(wr), clear_figure=True)
-        with c2:
-            comp = pd.DataFrame({
-                "Component": ["Bending", "Sheathing", "Fastener slip", "Anchorage", "Total"],
-                "Deflection (mm)": [wr["Δ bending (mm)"], wr["Δ sheathing (mm)"], wr["Δ fastener (mm)"], wr["Δ anchorage (mm)"], wr["Δ total (mm)"]],
-            })
-            st.dataframe(comp.round(5), hide_index=True, use_container_width=True)
-            st.warning("en is a user-entered deformation parameter in this V1. The FPInnovations example obtains en from CSA O86 based on force per nail. Do not treat the current value as universal.")
+            if wood_out is not None:
+                sel_storey = st.selectbox("Storey to inspect / link to current diaphragm model", wood_out["Storey"].astype(int).tolist(), index=0, key="wood_selected_storey_v3")
+                srow = wood_out.loc[wood_out["Storey"].eq(sel_storey)].iloc[0]
+                input_row = edited_storeys.loc[edited_storeys["Storey"].eq(sel_storey)].iloc[0]
 
-        st.markdown("### Wood-wall sensitivity")
-        wtab1, wtab2 = st.tabs(["Length sweep", "Single-parameter sweep"])
-        with wtab1:
-            a1, a2, a3 = st.columns(3)
-            wl_start = a1.number_input("Length sweep start (m)", min_value=0.1, value=max(0.5, wp["L_m"]*0.4), step=0.1, key="wood_L_start")
-            wl_stop = a2.number_input("Length sweep stop (m)", min_value=0.2, value=max(1.0, wp["L_m"]*1.2), step=0.1, key="wood_L_stop")
-            wl_n = a3.number_input("Points", min_value=11, max_value=501, value=101, step=10, key="wood_L_n")
-            wld = run_wood_length_study(wp["V_kN"], wp["H_m"], wl_start, wl_stop, int(wl_n), wp["E_N_per_mm2"], wp["A_mm2"], wp["Bv_N_per_mm"], wp["en_mm"], wp["da_mm"], auto_hd, hd_cap, hd_def)
-            a, b = st.columns(2)
-            with a:
-                st.pyplot(draw_line_chart(wld, "Wall Length (m)", ["k secant (kN/m)"], "Wall length vs wood-wall stiffness", "Wall length (m)", "k (kN/m)"), clear_figure=True)
-            with b:
-                st.pyplot(draw_line_chart(wld, "Wall Length (m)", ["Δ sheathing (mm)", "Δ fastener (mm)", "Δ anchorage (mm)"], "Wall length vs deformation components", "Wall length (m)", "Deflection (mm)"), clear_figure=True)
-        with wtab2:
-            param_map = {
-                "Wall force V": "V_kN",
-                "Wall height H": "H_m",
-                "Wall length L": "L_m",
-                "Boundary E": "E_N_per_mm2",
-                "Boundary A": "A_mm2",
-                "Sheathing Bv": "Bv_N_per_mm",
-                "Nail deformation en": "en_mm",
-                "Anchorage da": "da_mm",
-            }
-            ps1, ps2, ps3, ps4 = st.columns(4)
-            p_label = ps1.selectbox("Parameter", list(param_map.keys()), key="wood_param")
-            p_key = param_map[p_label]
-            base_val = float(wp[p_key])
-            p_start = ps2.number_input("Start", value=max(0.0001, base_val*0.5), key="wood_p_start")
-            p_stop = ps3.number_input("Stop", value=max(0.0002, base_val*1.5), key="wood_p_stop")
-            p_n = ps4.number_input("Points", min_value=11, max_value=501, value=101, step=10, key="wood_p_n")
-            psd = run_wood_parameter_study(wp, p_key, p_start, p_stop, int(p_n))
-            st.pyplot(draw_line_chart(psd, "Parameter", ["k secant (kN/m)"], f"{p_label} vs wall stiffness", p_label, "k (kN/m)"), clear_figure=True)
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Storey shear V", f"{float(srow['Storey shear V (kN)']):,.2f} kN")
+                m2.metric("Inter-storey Δ", f"{float(srow['Δ total inter-storey (mm)']):,.3f} mm")
+                m3.metric("Secant stiffness k", f"{float(srow['k secant (kN/m)']):,.0f} kN/m")
+                m4.metric("Lc", f"{float(srow['Lc (mm)'])/1000:.3f} m")
+                m5.metric("Rod T/Tr", f"{100*float(srow['Rod utilization T/Tr']):.1f}%")
 
-        st.markdown("### Send this wall stiffness to the building")
-        ap1, ap2 = st.columns([1.2, 1.0])
-        ap1.info(f"Target wall: {wood_preview_wall} | calculated k = {wr['k secant (kN/m)']:,.0f} kN/m")
-        if ap2.button("Apply calculated k to linked wall", type="primary", use_container_width=True):
-            new_walls = st.session_state.walls.copy()
-            new_walls.loc[new_walls["Wall Name"].eq(wood_preview_wall), "k (kN/m)"] = wr["k secant (kN/m)"]
-            st.session_state.walls = new_walls
-            st.success(f"Assigned k = {wr['k secant (kN/m)']:,.0f} kN/m to {wood_preview_wall}.")
-            st.rerun()
+                sc1, sc2 = st.columns([1.15, 1.0])
+                with sc1:
+                    st.pyplot(draw_wood_wall_schematic(input_row, srow), clear_figure=True, use_container_width=True)
+                with sc2:
+                    st.pyplot(draw_mechanics_breakdown(srow), clear_figure=True, use_container_width=True)
+
+                # Whole-stack visualizations
+                if len(wood_out) > 1:
+                    prof1, prof2 = st.columns(2)
+                    with prof1:
+                        st.pyplot(draw_line_chart(wood_out, "Storey", ["Δ total inter-storey (mm)"], "Inter-storey deflection by storey", "Storey (bottom → top)", "Δ (mm)"), clear_figure=True)
+                    with prof2:
+                        st.pyplot(draw_line_chart(wood_out, "Storey", ["k secant (kN/m)"], "Secant wall stiffness by storey", "Storey (bottom → top)", "k (kN/m)"), clear_figure=True)
+
+                st.markdown("### Mechanics calculation table")
+                show_cols = [
+                    "Storey", "Floor lateral force (kN)", "Storey shear V (kN)", "M top (kN·m)", "M base (kN·m)",
+                    "Lc (mm)", "Ac (mm²)", "At (mm²)", "EItr (N·mm²)", "Effective Bv (N/mm)",
+                    "Force per nail (N)", "en (mm)", "Tension chord force (kN)", "Compression chord force (kN)",
+                    "da total (mm)", "Δ bending (mm)", "Δ panel shear (mm)", "Δ nail slip (mm)",
+                    "Δ anchorage (mm)", "Δ rotation from below (mm)", "Δ total inter-storey (mm)",
+                    "k secant (kN/m)", "Inter-storey drift ratio", "Cumulative lateral displacement (mm)",
+                ]
+                st.dataframe(wood_out[show_cols].round(6), hide_index=True, use_container_width=True, height=360)
+
+                st.markdown("### Building preview using selected storey stiffness")
+                wood_preview_walls = clean_walls.copy()
+                wmask = wood_preview_walls["Wall Name"].eq(wood_preview_wall)
+                wood_preview_walls.loc[wmask, "k (kN/m)"] = float(srow["k secant (kN/m)"])
+                try:
+                    wood_preview_result = analyze_model(wood_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                    render_model_snapshot(
+                        wood_preview_walls, settings, wood_preview_result, wood_preview_load, global_case_mode,
+                        selected_wall=wood_preview_wall, heading=f"Building preview with Storey {int(sel_storey)} wood-wall k",
+                        show_force_bars=False, compact=True,
+                    )
+                    b1, b2 = st.columns([1.25, 0.75])
+                    b1.info(f"{wood_preview_wall}: current system k = {float(clean_walls.loc[clean_walls['Wall Name'].eq(wood_preview_wall), 'k (kN/m)'].iloc[0]):,.0f} kN/m → mechanics-based Storey {int(sel_storey)} k = {float(srow['k secant (kN/m)']):,.0f} kN/m")
+                    if b2.button("Apply selected storey k to building wall", type="primary", use_container_width=True, key="apply_mech_k_v3"):
+                        new_walls = st.session_state.walls.copy()
+                        new_walls.loc[new_walls["Wall Name"].eq(wood_preview_wall), "k (kN/m)"] = float(srow["k secant (kN/m)"])
+                        st.session_state.walls = new_walls
+                        st.rerun()
+                except Exception as exc:
+                    st.warning(f"Building preview unavailable: {exc}")
+
+                st.markdown("### Quick parametric sensitivity of the selected storey")
+                sens1, sens2, sens3, sens4 = st.columns(4)
+                sens_param = sens1.selectbox("Parameter", ["Wall length (m)", "Nail spacing (mm)", "Chord studs / end", "Floor lateral force (kN)"], key="wood_sens_param_v3")
+                base_val = float(input_row[sens_param])
+                if sens_param == "Chord studs / end":
+                    ss = sens2.number_input("Start", min_value=1, value=max(1, int(base_val)-2), step=1, key="wood_sens_start_int_v3")
+                    ee = sens3.number_input("Stop", min_value=1, value=max(2, int(base_val)+4), step=1, key="wood_sens_stop_int_v3")
+                    nn = sens4.number_input("Points", min_value=2, max_value=20, value=max(2, int(ee-ss+1)), step=1, key="wood_sens_n_int_v3")
+                    vals = np.unique(np.rint(np.linspace(ss, ee, int(nn))).astype(int))
+                else:
+                    ss = sens2.number_input("Start", min_value=0.001, value=max(0.001, base_val*0.5), key="wood_sens_start_v3")
+                    ee = sens3.number_input("Stop", min_value=0.002, value=max(0.002, base_val*1.5), key="wood_sens_stop_v3")
+                    nn = sens4.number_input("Points", min_value=11, max_value=501, value=101, step=10, key="wood_sens_n_v3")
+                    vals = np.linspace(float(ss), float(ee), int(nn))
+                sens_rows = []
+                for vv in vals:
+                    trial = edited_storeys.copy()
+                    trial.loc[trial["Storey"].eq(sel_storey), sens_param] = int(vv) if sens_param == "Chord studs / end" else float(vv)
+                    try:
+                        rr = analyze_stacked_wall(trial, bool(include_rot), float(live_fraction), float(cavity_mm), float(bearing_len))["storeys"]
+                        rrsel = rr.loc[rr["Storey"].eq(sel_storey)].iloc[0]
+                        sens_rows.append({"Parameter": float(vv), "k secant (kN/m)": float(rrsel["k secant (kN/m)"]), "Δ total (mm)": float(rrsel["Δ total inter-storey (mm)"])})
+                    except Exception:
+                        sens_rows.append({"Parameter": float(vv), "k secant (kN/m)": np.nan, "Δ total (mm)": np.nan})
+                sens_df = pd.DataFrame(sens_rows)
+                sp1, sp2 = st.columns(2)
+                with sp1:
+                    st.pyplot(draw_line_chart(sens_df, "Parameter", ["k secant (kN/m)"], f"{sens_param} vs stiffness", sens_param, "k (kN/m)"), clear_figure=True)
+                with sp2:
+                    st.pyplot(draw_line_chart(sens_df, "Parameter", ["Δ total (mm)"], f"{sens_param} vs deflection", sens_param, "Δ (mm)"), clear_figure=True)
+
+        with wood_db:
+            st.markdown("### Embedded engineering database explorer")
+            st.caption("These tables are transcribed from `shearwallanalysis_R2_faster.py`. They are shown transparently so users can inspect exactly which values the analysis is using.")
+            db_name = st.selectbox("Database", list(DATABASES.keys()), key="wood_db_name_v3")
+            db = DATABASES[db_name].copy()
+            st.dataframe(db, hide_index=True, use_container_width=True, height=min(520, 90 + 35 * len(db)))
+            st.download_button(
+                f"Download {db_name} CSV", db.to_csv(index=False).encode("utf-8"),
+                file_name=f"{db_name.lower().replace(' ', '_').replace('/', '_')}.csv", mime="text/csv", key="wood_db_dl_v3"
+            )
+            st.markdown("#### Database inventory")
+            inv = pd.DataFrame([{"Database": name, "Rows": len(df), "Columns": len(df.columns)} for name, df in DATABASES.items()])
+            st.dataframe(inv, hide_index=True, use_container_width=True)
+
+        with wood_method:
+            st.markdown("### Implemented mechanics")
+            st.latex(r"\Delta_i=\Delta_{b,i}+\Delta_{s,i}+\Delta_{n,i}+\Delta_{a,i}+\Delta_{r,i}")
+            st.latex(r"\Delta_{b,i}=\frac{V_iH_i^3}{3(EI)_i}+\frac{M_iH_i^2}{2(EI)_i}")
+            st.latex(r"\Delta_{s,i}=\frac{V_iH_i}{L_iB_{v,i}}")
+            st.latex(r"e_{n,i}=\left(\frac{0.013\,v_{s,i}}{d_f^2}\right)^2,\qquad \Delta_{n,i}=0.0025H_ie_{n,i}")
+            st.latex(r"\Delta_{a,i}=\frac{H_i}{L_i}d_{a,i}")
+            st.latex(r"\Delta_{r,i}=H_i\left(\sum_{j=1}^{i-1}\theta_j+\sum_{j=1}^{i-1}\alpha_j\right)")
+            st.latex(r"k_i=\frac{V_i}{\Delta_i}")
+            st.markdown("**Continuous-rod transformed section**")
+            st.latex(r"n=E_t/E_c,\quad A_{t,tr}=nA_t,\quad y_{tr}=\frac{A_cL_c}{A_{t,tr}+A_c},\quad I_{tr}=A_{t,tr}y_{tr}^2+A_c(L_c-y_{tr})^2")
+            st.markdown("**Symmetric chord/rod geometry used in this app**")
+            st.latex(r"L_c=L_s-(n_{chord}\times38+228.6)\ \mathrm{mm}")
+            st.caption("`n_chord` is entered explicitly as the number of chord studs at each end; the same number is assumed on both ends.")
+            st.markdown("### Mechanics regression checks")
+            mech_tests = run_mechanics_self_tests()
+            st.dataframe(mech_tests, hide_index=True, use_container_width=True)
+            if bool(mech_tests["Pass"].all()):
+                st.success("All mechanics regression checks passed.")
+            else:
+                st.error("At least one mechanics regression check failed.")
 
     # ------------------------------------------------------------------
-    # Coupled iteration
+    # Coupled iteration - current rigid model is a single diaphragm level
     # ------------------------------------------------------------------
     with tabs[7]:
-        st.subheader("Coupled single-wood-wall iteration")
-        st.caption("Re-distributes building force, calculates the selected wood wall's secant stiffness, updates k, and repeats. Other walls remain fixed. en remains the user-entered value in this V1.")
-        ci1, ci2, ci3, ci4 = st.columns(4)
-        c_wall = ci1.selectbox("Wood wall to iterate", clean_walls["Wall Name"].tolist(), key="coupled_wall")
-        c_load = ci2.selectbox("Load direction used for iteration", ["X", "Y"], key="coupled_load")
-        c_tol_pct = ci3.number_input("Convergence tolerance (%)", min_value=0.01, max_value=10.0, value=0.5, step=0.1, key="coupled_tol")
-        c_relax = ci4.number_input("Relaxation factor", min_value=0.05, max_value=1.0, value=0.7, step=0.05, key="coupled_relax")
-        cmax = st.number_input("Maximum iterations", min_value=2, max_value=100, value=30, step=1, key="coupled_max")
-        st.info("The selected wall uses the current Wood Wall Lab properties. Its wall length is taken from the building wall table; all other wood properties come from the lab.")
-        render_model_snapshot(
-            clean_walls, settings, result, c_load, global_case_mode,
-            selected_wall=c_wall, heading="Current model before coupled iteration", show_force_bars=False, compact=True,
-        )
-        if st.button("Run coupled iteration", type="primary", key="run_coupled"):
-            cw = current_wood_params()
-            cw["L_m"] = float(clean_walls.loc[clean_walls["Wall Name"].eq(c_wall), "Wall Length (m)"].iloc[0])
-            auto = st.session_state.get("lab_anchor_mode", "Manual da") == "Linearized hold-down"
-            hist, final_walls, coupled = coupled_single_wood_wall(clean_walls, settings, c_wall, c_load, cw, c_tol_pct/100.0, int(cmax), c_relax, auto, float(st.session_state.wood_hd_capacity), float(st.session_state.wood_hd_deflection))
-            st.session_state.coupled_hist = hist
-            st.session_state.coupled_final_walls = final_walls
-            st.session_state.coupled_result = coupled
-        if "coupled_hist" in st.session_state:
-            hist = st.session_state.coupled_hist
-            meta = st.session_state.coupled_result["meta"]
-            if meta["converged"]:
-                st.success(f"Converged in {meta['iterations']} iterations. Final k = {meta['final_k']:,.0f} kN/m.")
-            else:
-                st.warning(f"Did not meet the selected tolerance within {meta['iterations']} iterations. Final k = {meta['final_k']:,.0f} kN/m.")
-            a, b = st.columns(2)
-            with a:
-                st.pyplot(draw_line_chart(hist, "Iteration", ["k used (kN/m)", "k from wall model (kN/m)"], "Stiffness convergence", "Iteration", "k (kN/m)"), clear_figure=True)
-            with b:
-                st.pyplot(draw_line_chart(hist, "Iteration", ["Wall force |V| (kN)"], "Wall-force convergence", "Iteration", "Force (kN)"), clear_figure=True)
-            st.dataframe(hist.round(6), hide_index=True, use_container_width=True)
-            try:
-                final_preview_walls = st.session_state.coupled_final_walls.copy()
-                final_preview_result = analyze_model(final_preview_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
-                render_model_snapshot(
-                    final_preview_walls, settings, final_preview_result, c_load, global_case_mode,
-                    selected_wall=c_wall, heading="Converged coupled model preview", show_force_bars=False, compact=True,
-                )
-            except Exception as exc:
-                st.warning(f"Converged-model preview unavailable: {exc}")
-            if st.button("Use converged wall model in main system", key="apply_coupled"):
-                st.session_state.walls = st.session_state.coupled_final_walls.copy()
-                st.rerun()
+        st.subheader("Coupled rigid-diaphragm ↔ wood-wall iteration")
+        st.caption("The current building model represents one diaphragm level. Therefore automatic coupled iteration is enabled for a one-storey Wood Wall Lab model; multi-storey results can still be applied storey-by-storey manually until a full multi-level diaphragm model is added.")
+        if int(st.session_state.wood_n_storeys) != 1:
+            st.warning("Set the Wood Wall Lab to 1 storey to run automatic coupled iteration with this single-level rigid-diaphragm model.")
+            render_model_snapshot(clean_walls, settings, result, global_load_dir, global_case_mode, heading="Current single-level diaphragm model", show_force_bars=False, compact=True)
+        else:
+            ci1, ci2, ci3, ci4 = st.columns(4)
+            c_wall = ci1.selectbox("Wood wall to iterate", clean_walls["Wall Name"].tolist(), key="coupled_wall_v3")
+            c_load = ci2.selectbox("Load direction", ["X", "Y"], key="coupled_load_v3")
+            c_tol_pct = ci3.number_input("Convergence tolerance (%)", min_value=0.01, max_value=10.0, value=0.5, step=0.1, key="coupled_tol_v3")
+            c_relax = ci4.number_input("Relaxation factor", min_value=0.05, max_value=1.0, value=0.7, step=0.05, key="coupled_relax_v3")
+            cmax = st.number_input("Maximum iterations", min_value=2, max_value=100, value=30, step=1, key="coupled_max_v3")
+            render_model_snapshot(clean_walls, settings, result, c_load, global_case_mode, selected_wall=c_wall, heading="Current model before coupled iteration", show_force_bars=False, compact=True)
+
+            if st.button("Run mechanics-based coupled iteration", type="primary", key="run_coupled_v3"):
+                base_design = st.session_state.wood_storeys.iloc[0].to_dict()
+                target_length = float(clean_walls.loc[clean_walls["Wall Name"].eq(c_wall), "Wall Length (m)"].iloc[0])
+                walls_it = clean_walls.copy()
+                k_used = float(walls_it.loc[walls_it["Wall Name"].eq(c_wall), "k (kN/m)"].iloc[0])
+                hist_rows = []
+                prev_force = None
+                converged = False
+                for it in range(1, int(cmax) + 1):
+                    walls_it.loc[walls_it["Wall Name"].eq(c_wall), "k (kN/m)"] = k_used
+                    rr = analyze_model(walls_it, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                    view_tbl, _case_label = force_table_for_view(rr, c_load, global_case_mode)
+                    view_row = view_tbl.loc[view_tbl["Wall Name"].eq(c_wall)].iloc[0]
+                    Vwall = abs(float(view_row[f"{c_load}-load governing signed V (kN)"]))
+                    wr = single_storey_mechanics_k(
+                        base_design, Vwall, wall_length_m=target_length,
+                        live_fraction=float(st.session_state.wood_live_fraction),
+                        cavity_mm=float(st.session_state.wood_cavity_mm),
+                        bearing_length_mm=float(st.session_state.wood_bearing_length_mm),
+                    )
+                    k_model = float(wr["k secant (kN/m)"])
+                    k_next = float(c_relax) * k_model + (1.0 - float(c_relax)) * k_used
+                    dk = abs(k_next - k_used) / max(abs(k_used), 1e-9)
+                    dv = np.nan if prev_force is None else abs(Vwall - prev_force) / max(abs(prev_force), 1e-9)
+                    hist_rows.append({
+                        "Iteration": it, "Wall force |V| (kN)": Vwall, "k used (kN/m)": k_used,
+                        "k from mechanics model (kN/m)": k_model, "k next (kN/m)": k_next,
+                        "Relative Δk": dk, "Relative ΔV": dv, "Wall deflection (mm)": float(wr["Δ total inter-storey (mm)"]),
+                    })
+                    if dk < float(c_tol_pct)/100.0 and (prev_force is None or dv < float(c_tol_pct)/100.0):
+                        k_used = k_next
+                        converged = True
+                        break
+                    prev_force = Vwall
+                    k_used = k_next
+                walls_it.loc[walls_it["Wall Name"].eq(c_wall), "k (kN/m)"] = k_used
+                st.session_state.coupled_hist_v3 = pd.DataFrame(hist_rows)
+                st.session_state.coupled_final_walls_v3 = walls_it.copy()
+                st.session_state.coupled_converged_v3 = converged
+
+            if "coupled_hist_v3" in st.session_state:
+                hist = st.session_state.coupled_hist_v3
+                if st.session_state.get("coupled_converged_v3", False):
+                    st.success(f"Converged in {len(hist)} iterations. Final k = {float(hist.iloc[-1]['k next (kN/m)']):,.0f} kN/m.")
+                else:
+                    st.warning(f"Maximum iterations reached. Last relaxed k = {float(hist.iloc[-1]['k next (kN/m)']):,.0f} kN/m.")
+                cpa, cpb = st.columns(2)
+                with cpa:
+                    st.pyplot(draw_line_chart(hist, "Iteration", ["k used (kN/m)", "k from mechanics model (kN/m)"], "Stiffness convergence", "Iteration", "k (kN/m)"), clear_figure=True)
+                with cpb:
+                    st.pyplot(draw_line_chart(hist, "Iteration", ["Wall force |V| (kN)"], "Wall-force convergence", "Iteration", "Force (kN)"), clear_figure=True)
+                st.dataframe(hist.round(6), hide_index=True, use_container_width=True)
+                try:
+                    final_walls = st.session_state.coupled_final_walls_v3
+                    final_result = analyze_model(final_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                    render_model_snapshot(final_walls, settings, final_result, c_load, global_case_mode, selected_wall=c_wall, heading="Converged mechanics-based coupled model", show_force_bars=False, compact=True)
+                except Exception as exc:
+                    st.warning(f"Final coupled preview unavailable: {exc}")
+                if st.button("Use converged wall stiffness in main system", key="apply_coupled_v3"):
+                    st.session_state.walls = st.session_state.coupled_final_walls_v3.copy()
+                    st.rerun()
+
 
     # ------------------------------------------------------------------
     # Validation and export
@@ -997,9 +1344,14 @@ def main() -> None:
         with v1:
             st.markdown("### Automated self-tests")
             tests = run_self_tests()
-            st.dataframe(tests, hide_index=True, use_container_width=True)
-            if bool(tests["Pass"].all()):
-                st.success("All automated checks passed.")
+            mech_tests = run_mechanics_self_tests()
+            tests_all = pd.concat([
+                tests.assign(Engine="Rigid diaphragm"),
+                mech_tests.assign(Engine="Wood-wall mechanics"),
+            ], ignore_index=True, sort=False)
+            st.dataframe(tests_all, hide_index=True, use_container_width=True)
+            if bool(tests_all["Pass"].fillna(False).all()):
+                st.success("All rigid-diaphragm and wood-wall mechanics checks passed.")
             else:
                 st.error("At least one automated check failed. Do not rely on research outputs until resolved.")
         with v2:
@@ -1021,10 +1373,12 @@ def main() -> None:
         studies = {}
         for key, state_key in [
             ("Geometry", "geo_df"), ("Stiffness", "stiff_df"), ("Length_Fixed_k", "length_fixed_df"),
-            ("Length_Calc_k", "length_calc_df"), ("Interaction", "heat_df"), ("Coupled_History", "coupled_hist")
+            ("Length_Calc_k", "length_calc_df"), ("Interaction", "heat_df"), ("Coupled_History", "coupled_hist_v3")
         ]:
             if state_key in st.session_state:
                 studies[key] = st.session_state[state_key]
+        if "wood_mechanics_result" in st.session_state:
+            studies["Wood_Mechanics"] = st.session_state.wood_mechanics_result
         if "batch_suite" in st.session_state:
             studies.update({f"Batch_{k}": v for k, v in st.session_state.batch_suite.items()})
         xlsx = to_excel_bytes(result, studies)
@@ -1034,12 +1388,12 @@ def main() -> None:
 
         st.markdown(
             """
-**Engineering-use boundary.** The rigid-diaphragm engine is equilibrium-checked and benchmarked against the uploaded FPInnovations example. The Wood Wall Laboratory implements the stiffness equation printed in that example, but this V1 deliberately requires the user to supply verified `Bv`, `en`, and anchorage properties. It does not reproduce CSA O86 tables or manufacturer databases.
+**Engineering-use boundary.** The rigid-diaphragm engine is equilibrium-checked and benchmarked against the uploaded FPInnovations example. The Wood Wall Laboratory uses the attached FPInnovations mechanics-based stacked-wall equations, the user-confirmed symmetric `Lc` rule, the validated nail-slip relationship, and the validated anchorage formulation from the supplied Python scripts. Embedded property tables are transcribed from `shearwallanalysis_R2_faster.py` and are exposed in the Database Explorer for review. Final engineering use still requires confirmation that the selected database values and source editions are appropriate for the project.
             """
         )
 
     st.divider()
-    st.caption("Research Lab V1 - keep geometry effects, stiffness effects, wall-length effects, and wood-wall property assumptions separated when interpreting results.")
+    st.caption("Research Lab Mechanics V3 - keep geometry effects, stiffness effects, wall-length effects, and wood-wall property assumptions separated when interpreting results.")
 
 
 if __name__ == "__main__":
