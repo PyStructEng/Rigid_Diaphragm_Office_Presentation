@@ -20,7 +20,6 @@ from rigid_diaphragm_core import (
     default_walls,
     fpinnovations_preset,
     linearized_holdown_da_mm,
-    length_proportional_stiffness_model,
     normalize_walls,
     run_geometry_study,
     run_interaction_study,
@@ -32,6 +31,32 @@ from rigid_diaphragm_core import (
     run_wood_parameter_study,
     wood_wall_response,
 )
+
+# V5+ core helper.  Keep a local fallback so an older compatible core does not
+# crash the entire Streamlit app if only the front-end file was updated.
+try:
+    from rigid_diaphragm_core import length_proportional_stiffness_model
+except ImportError:
+    def length_proportional_stiffness_model(walls: pd.DataFrame):
+        df = normalize_walls(walls)
+        total_length = float(df["Wall Length (m)"].sum())
+        total_k = float(df["k (kN/m)"].sum())
+        if total_length <= 0 or total_k <= 0:
+            raise ValueError("Wall lengths and current stiffness sum must be positive.")
+        scale = total_k / total_length
+        out = df.copy()
+        out["Original k (kN/m)"] = out["k (kN/m)"]
+        out["Direction length sum (m)"] = out.groupby("Direction")["Wall Length (m)"].transform("sum")
+        out["Direction relative stiffness L/ΣL"] = out["Wall Length (m)"] / out["Direction length sum (m)"]
+        out["Length-proportional mapped k (kN/m)"] = scale * out["Wall Length (m)"]
+        model = df.copy()
+        model["k (kN/m)"] = out["Length-proportional mapped k (kN/m)"]
+        table = out[[
+            "Wall Name", "Direction", "Wall Length (m)",
+            "Original k (kN/m)", "Direction relative stiffness L/ΣL",
+            "Length-proportional mapped k (kN/m)",
+        ]].copy()
+        return model, table, scale
 
 from wood_shearwall_mechanics import (
     DATABASES,
