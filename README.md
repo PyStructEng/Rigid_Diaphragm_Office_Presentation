@@ -1,107 +1,108 @@
-RIGID DIAPHRAGM RESEARCH LAB — MECHANICS-BASED WOOD WALL V3
-============================================================
+RIGID DIAPHRAGM RESEARCH LAB — WOOD PARAMETRIC ATLAS V7
+========================================================
 
-DEPLOYMENT FILES
-----------------
-1. rigid_diaphragm_parametric_app.py     Streamlit entry point
-2. rigid_diaphragm_core.py               rigid-diaphragm mechanics / parametric engine
-3. wood_shearwall_mechanics.py           stacked wood shear-wall mechanics + embedded databases
-4. requirements.txt                      Streamlit Cloud dependencies
+FILES
+-----
+1. rigid_diaphragm_parametric_app.py   Updated Streamlit app
+2. rigid_diaphragm_core.py             Existing rigid-diaphragm calculation engine
+3. wood_shearwall_mechanics.py         Existing mechanics-based wood-wall engine
+4. wood_parametric_study.py            NEW batch parametric atlas engine
+5. requirements.txt                    Python dependencies
 
-STREAMLIT CLOUD
----------------
-Point the app entry point to:
-    rigid_diaphragm_parametric_app.py
+WHAT WAS ADDED
+--------------
+Batch suite now contains two subtabs:
+- Core diaphragm batch
+- Wood shearwall parametric atlas
 
-The three Python files must be in the same repository folder.
+The Wood shearwall parametric atlas uses the current one-storey Wood Wall Lab row
+as the baseline/fixed design and sweeps:
+- Panel type
+- Panel thickness (only type/thickness pairs present in the embedded Bv table)
+- Panel sides (S.S / B.S)
+- Nail spacing
+- Wall height H
+- Aspect ratio H/L (wall length is calculated as H/(H/L))
+- Demand
 
-WOOD-WALL MECHANICS IMPLEMENTED
+Demand can be defined as:
+- Baseline force multiplier
+- Constant unit shear (kN/m)
+- Constant total force (kN)
+
+OUTPUTS STORED FOR EVERY CASE
+-----------------------------
+- Full input/configuration traceability
+- Δ bending
+- Δ panel shear
+- Δ nail slip
+- Δ anchorage
+- Δ total
+- Component fractions
+- Secant stiffness k
+- k/L
+- Reference stiffness at the same H, L and V
+- k/reference same condition
+- Global baseline stiffness and k/global baseline
+- Rod utilization flag
+- Analysis status / error text
+
+IMPORTANT ENGINEERING BOUNDARY
+------------------------------
+The atlas is a mechanics/stiffness study. Panel type/thickness is screened against
+the embedded Bv database, but selected nail spacing is NOT checked against a CSA
+approved shearwall resistance table and the atlas does not establish factored wall
+resistance. Verify permitted wall construction and strength separately before using
+a configuration on a project.
+
+RECOMMENDED FIRST OFFICE-REFERENCE RUN
+--------------------------------------
+Panel types: all available
+Panel thicknesses: 9.5, 12.5, 15.5, 18.5 mm (expand later)
+Panel sides: S.S, B.S
+Nail spacing research levels: 75, 150, 300 mm
+Wall heights: 2.4, 3.0, 3.6 m
+Aspect ratios H/L: 0.5, 0.75, 1.0, 1.5, 2.0
+Demand basis: Baseline force multiplier
+Demand levels: 0.25, 0.5, 0.75, 1.0, 1.5
+
+This produces about 4,050 cases with the current embedded panel database and is a
+good first dataset before expanding to additional thicknesses/spacings.
+
+HOW TO COLLECT DATA FOR CHATGPT
 -------------------------------
-Input storeys are ordered BOTTOM -> TOP (Storey 1 is the lowest storey).
-All lateral forces supplied to the wood-wall module are SERVICE-LEVEL inputs.
-No strength load factors are applied internally.
+1. In Wood Wall Lab, set Number of stacked storeys = 1.
+2. Enter the baseline wall construction and the framing/rod/anchorage assumptions
+   you want held constant.
+3. Go to Batch suite > Wood shearwall parametric atlas.
+4. Select the sweep variables and click Run wood shearwall parametric atlas.
+5. Download: wood_shearwall_parametric_atlas.xlsx
+6. Upload that workbook to ChatGPT.
+7. Ask:
+   "Analyze this wood shearwall parametric study for my rigid-diaphragm presentation.
+   Generate the key graphs, sensitivity ranking, engineering comments, limitations,
+   and office-reference conclusions. Focus on what controls stiffness, demand-
+   dependence, diminishing returns, deformation components, and whether k is
+   proportional to wall length."
 
-The stacked-wall calculation is based on the attached FPInnovations/CWC mechanics method:
-    Delta_i = Delta_b,i + Delta_s,i + Delta_n,i + Delta_a,i + Delta_r,i
+The workbook contains:
+- README
+- Study_Metadata
+- Baseline_Design
+- Assembly_Catalog
+- Study_Summary
+- Data_Dictionary
+- Parametric_Data
 
-Bending:
-    Delta_b,i = V_i H_i^3 / [3(EI)_i] + M_i H_i^2 / [2(EI)_i]
+SECOND-STAGE STUDY
+------------------
+After the wall atlas is understood, use the mechanics/coupled diaphragm tools to
+connect selected wall stiffness differences to:
+- CR movement
+- natural/accidental torsion
+- direct shear redistribution
+- individual wall force changes
 
-Continuous-rod transformed section:
-    n = Et/Ec
-    At,tr = n At
-    ytr = Ac Lc / (At,tr + Ac)
-    Itr = At,tr ytr^2 + Ac (Lc-ytr)^2
-
-Panel shear:
-    Delta_s,i = V_i H_i / (L_i Bv,i)
-
-Validated nail-slip relation supplied by user:
-    en = [(0.013 * force_per_nail) / d_f^2]^2
-    Delta_n,i = 0.0025 H_i en
-
-Anchorage:
-    da uses the existing validated script logic:
-      take-up device load deformation + seating increment + compression-perpendicular deformation
-    Delta_a,i = (H_i/L_i) da_i
-
-Bottom rotation:
-    Includes ONLY rotations from storeys below the current storey, per FPInnovations Eq. 13.
-    Bottom-storey rotation contribution is therefore zero.
-
-Secant stiffness:
-    k_i = V_i / Delta_i
-
-SYMMETRIC Lc RULE
------------------
-The app asks directly for "Chord studs / end" and assumes the same number at both ends.
-    Lc = Ls - (n_chord * 38 + cavity)
-Default cavity = 228.6 mm (9 in), matching the user's validated spreadsheet assumption.
-
-EMBEDDED DATABASE EXPLORER
---------------------------
-The active values are transcribed from shearwallanalysis_R2_faster.py and exposed in the app:
-- sheathing Bv
-- lumber E parallel / E perpendicular
-- take-up devices
-- rod resistance
-- rod geometry / effective area data
-- shear clips
-- bearing plates
-- panel buckling properties
-- sill bolt capacities
-- sill nail A and B capacities
-
-R1/R2 NOTE
-----------
-The app does not silently merge conflicting legacy data between R1 and R2. The R2 data are the active
-calculation tables in this V3 package. Database values remain visible in the app so they can be audited.
-
-CURRENT COUPLING SCOPE
-----------------------
-The rigid-diaphragm model is currently a single diaphragm level. Automatic diaphragm <-> wood-wall
-iteration is therefore enabled for a ONE-STOREY Wood Wall Lab model. Multi-storey wall stiffnesses can
-be calculated and applied storey-by-storey, but a full simultaneous multi-level diaphragm coupling is a
-future extension.
-
-VALIDATION INCLUDED
--------------------
-Rigid-diaphragm tests:
-- CM/CR symmetry
-- uniform stiffness scaling invariance
-- fixed-k wall-length force invariance
-- force/moment equilibrium
-- FPInnovations benchmark
-
-Wood mechanics tests:
-- Storey 1 lower-storey rotation contribution = 0
-- symmetric Lc geometry
-- validated nail-slip equation
-- current storey excluded from Eq. 13 lower-storey rotation
-- storey shear accumulation
-
-IMPORTANT
----------
-The embedded values are reproduced from the supplied Python script; the app does not independently
-establish the applicable code/manufacturer edition. Confirm selected property values and source editions
-for the project before engineering use.
+That second stage is where the office reference can answer when a simple relative-
+stiffness assumption is adequate and when mechanics-based stiffness materially
+changes the rigid-diaphragm result.
