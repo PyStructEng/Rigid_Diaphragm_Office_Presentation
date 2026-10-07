@@ -20,6 +20,7 @@ from rigid_diaphragm_core import (
     default_walls,
     fpinnovations_preset,
     linearized_holdown_da_mm,
+    length_proportional_stiffness_model,
     normalize_walls,
     run_geometry_study,
     run_interaction_study,
@@ -548,6 +549,82 @@ def single_storey_mechanics_k(storey_row: pd.Series | Dict[str, object], V_kN: f
     )["storeys"].iloc[0]
     return out.to_dict()
 
+
+
+def build_all_wall_design_table(
+    walls: pd.DataFrame,
+    existing: pd.DataFrame | None,
+    base_design: pd.Series | Dict[str, object],
+) -> pd.DataFrame:
+    """Return one single-storey wood mechanics design row per building wall.
+
+    Wall length and direction are synchronized from the diaphragm model. Existing
+    wall-specific design choices are preserved by Wall Name. New walls inherit
+    the current Wood Wall Lab single-storey design.
+    """
+    walls_n = normalize_walls(walls)
+    base = dict(base_design)
+    old = None
+    if isinstance(existing, pd.DataFrame) and not existing.empty and "Wall Name" in existing.columns:
+        old = existing.set_index("Wall Name", drop=False)
+
+    rows = []
+    for _, wr in walls_n.iterrows():
+        name = str(wr["Wall Name"])
+        if old is not None and name in old.index:
+            row = old.loc[name].to_dict()
+        else:
+            row = {
+                "Couple mechanics": True,
+                "Wall Name": name,
+                "Direction": str(wr["Direction"]),
+                "Height (m)": float(base.get("Height (m)", 3.0)),
+                "Wall length (m)": float(wr["Wall Length (m)"]),
+                "Panel Type": str(base.get("Panel Type", "CSP")),
+                "Panel thickness (mm)": float(base.get("Panel thickness (mm)", 12.5)),
+                "Panel sides": str(base.get("Panel sides", "S.S")),
+                "Nail diameter (mm)": float(base.get("Nail diameter (mm)", 3.25)),
+                "Nail spacing (mm)": float(base.get("Nail spacing (mm)", 150.0)),
+                "Species": str(base.get("Species", "S-P-F")),
+                "Grade": str(base.get("Grade", "No.1/No.2")),
+                "Stud size": str(base.get("Stud size", "2x6")),
+                "Chord studs / end": int(base.get("Chord studs / end", 4)),
+                "Rod model": str(base.get("Rod model", "SR8H")),
+                "Take-up device": str(base.get("Take-up device", "CTUD87")),
+                "Service dead line load (kN/m)": float(base.get("Service dead line load (kN/m)", 0.0)),
+                "Service live line load (kN/m)": float(base.get("Service live line load (kN/m)", 0.0)),
+            }
+        row["Wall Name"] = name
+        row["Direction"] = str(wr["Direction"])
+        row["Wall length (m)"] = float(wr["Wall Length (m)"])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def design_row_to_storey_row(design_row: pd.Series | Dict[str, object], V_kN: float) -> Dict[str, object]:
+    """Convert an all-wall design row to the mechanics engine's one-storey schema."""
+    d = dict(design_row)
+    return {
+        "Storey": 1,
+        "Floor lateral force (kN)": abs(float(V_kN)),
+        "Height (m)": float(d["Height (m)"]),
+        "Wall length (m)": float(d["Wall length (m)"]),
+        "Panel Type": str(d["Panel Type"]),
+        "Panel thickness (mm)": float(d["Panel thickness (mm)"]),
+        "Panel sides": str(d["Panel sides"]),
+        "Nail diameter (mm)": float(d["Nail diameter (mm)"]),
+        "Nail spacing (mm)": float(d["Nail spacing (mm)"]),
+        "Species": str(d["Species"]),
+        "Grade": str(d["Grade"]),
+        "Stud size": str(d["Stud size"]),
+        "Chord studs / end": int(d["Chord studs / end"]),
+        "Rod model": str(d["Rod model"]),
+        "Take-up device": str(d["Take-up device"]),
+        "Service dead line load (kN/m)": float(d["Service dead line load (kN/m)"]),
+        "Service live line load (kN/m)": float(d["Service live line load (kN/m)"]),
+    }
+
+
 def to_excel_bytes(current_result: Dict[str, object], studies: Dict[str, pd.DataFrame] | None = None) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
@@ -888,6 +965,55 @@ def main() -> None:
                 with b:
                     st.pyplot(draw_line_chart(sd, "Relative stiffness k_i/Σk_dir", ["Selected wall force share |V|/F"], "Relative stiffness vs force share", "kᵢ/Σk", "|Vᵢ|/F"), clear_figure=True)
                 st.dataframe(sd.round(5), hide_index=True, use_container_width=True, height=340)
+
+        st.markdown("### Preliminary CWC/FPInnovations method — stiffness proportional to wall length")
+        st.caption(
+            "For an initial rigid-diaphragm analysis, published CWC/FPInnovations examples use relative wall "
+            "stiffness proportional to wall length: kᵢ ∝ Lᵢ. This is a preliminary distribution assumption, "
+            "not a mechanics-based physical stiffness. The mapped k values below use one common scale factor only "
+            "so the existing solver can display them in kN/m; the force distribution depends only on their ratios."
+        )
+        try:
+            lp_walls, lp_table, lp_scale = length_proportional_stiffness_model(clean_walls)
+            lp_result = analyze_model(lp_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+
+            lpa, lpb, lpc = st.columns(3)
+            lpa.metric("Common display scale C", f"{lp_scale:,.1f} kN/m²")
+            lpb.metric("Length-based Xcr", f"{lp_result['properties']['Xcr']:.3f} m")
+            lpc.metric("Length-based Ycr", f"{lp_result['properties']['Ycr']:.3f} m")
+
+            render_model_snapshot(
+                lp_walls, settings, lp_result, s_load, global_case_mode,
+                selected_wall=s_wall, heading="Length-proportional relative-stiffness preview",
+                show_force_bars=False, compact=True,
+            )
+
+            base_view, _ = force_table_for_view(result, s_load, global_case_mode)
+            lp_view, _ = force_table_for_view(lp_result, s_load, global_case_mode)
+            force_col = f"{s_load.upper()}-load governing signed V (kN)"
+            cmp = base_view[["Wall Name", force_col]].rename(columns={force_col:"Current model V (kN)"})
+            cmp = cmp.merge(
+                lp_view[["Wall Name", force_col]].rename(columns={force_col:"Length-proportional V (kN)"}),
+                on="Wall Name", how="outer"
+            )
+            cmp["ΔV (kN)"] = cmp["Length-proportional V (kN)"] - cmp["Current model V (kN)"]
+            denom = cmp["Current model V (kN)"].abs()
+            cmp["Δ|V| vs current (%)"] = np.where(denom > 1e-9,
+                (cmp["Length-proportional V (kN)"].abs() - denom) / denom * 100.0, np.nan)
+            cmp = cmp.merge(lp_table, on="Wall Name", how="left")
+
+            st.markdown("#### Current model vs length-proportional initial RDA")
+            st.dataframe(cmp.round(4), hide_index=True, use_container_width=True)
+            st.caption(
+                "Interpret the L/ΣL column as the relative stiffness assumption. The mapped k values are a normalized "
+                "representation for the solver, not calculated wall stiffness. For final comparison, use the mechanics-based k = V/Δ solution."
+            )
+
+            if st.button("Apply length-proportional relative stiffness to current model", key="apply_length_prop_k"):
+                st.session_state.walls = lp_walls
+                st.rerun()
+        except Exception as exc:
+            st.warning(f"Length-proportional stiffness preview unavailable: {exc}")
 
     # ------------------------------------------------------------------
     # Length
@@ -1352,52 +1478,137 @@ def main() -> None:
                 st.error("At least one mechanics regression check failed.")
 
     # ------------------------------------------------------------------
-    # Coupled iteration - current rigid model is a single diaphragm level
+    # Method 4 - fully coupled all-wall mechanics iteration
     # ------------------------------------------------------------------
     with tabs[7]:
-        st.subheader("Coupled rigid-diaphragm ↔ wood-wall iteration")
-        st.caption("The current building model represents one diaphragm level. Automatic coupled iteration is therefore enabled for a one-storey Wood Wall Lab model. Every iteration now stores the full diaphragm state: CR, J, eccentricity, stiffness and the force in every wall.")
+        st.subheader("Method 4 - fully coupled converged mechanics stiffness")
+        st.caption(
+            "Every participating wood wall is updated in the same global iteration. The diaphragm is solved once, "
+            "the simultaneous service force in every coupled wall is sent to its own mechanics model, all new wall "
+            "stiffnesses are calculated, all stiffnesses are updated together, and the diaphragm is solved again."
+        )
+        st.info(
+            "This is a single-diaphragm-level coupled solution. Each participating wall therefore uses a one-storey "
+            "wood mechanics model at this level. Walls that are not wood, or that you intentionally want to keep fixed, "
+            "can be unchecked in the design table."
+        )
+
         if int(st.session_state.wood_n_storeys) != 1:
-            st.warning("Set the Wood Wall Lab to 1 storey to run automatic coupled iteration with this single-level rigid-diaphragm model.")
+            st.warning("For the fully coupled single-diaphragm solution, set the Wood Wall Lab to 1 storey. Multi-storey wall mechanics remain available in the Wood Wall Lab, but a true multi-level coupled building model is a separate analysis problem.")
             render_model_snapshot(clean_walls, settings, result, global_load_dir, global_case_mode, heading="Current single-level diaphragm model", show_force_bars=False, compact=True)
         else:
-            ci1, ci2, ci3, ci4 = st.columns(4)
-            c_wall = ci1.selectbox("Wood wall to iterate", clean_walls["Wall Name"].tolist(), key="coupled_wall_v4")
-            c_load = ci2.selectbox("Load direction", ["X", "Y"], key="coupled_load_v4")
-            c_tol_pct = ci3.number_input("Convergence tolerance (%)", min_value=0.01, max_value=10.0, value=0.5, step=0.1, key="coupled_tol_v4")
-            c_relax = ci4.number_input("Relaxation factor", min_value=0.05, max_value=1.0, value=0.7, step=0.05, key="coupled_relax_v4")
-            cmax = st.number_input("Maximum iterations", min_value=2, max_value=100, value=30, step=1, key="coupled_max_v4")
-            render_model_snapshot(clean_walls, settings, result, c_load, global_case_mode, selected_wall=c_wall, heading="Current model before coupled iteration", show_force_bars=False, compact=True)
+            base_design = st.session_state.wood_storeys.iloc[0].to_dict()
+            current_designs = st.session_state.get("all_wall_designs_v6")
+            design_table = build_all_wall_design_table(clean_walls, current_designs, base_design)
 
-            if st.button("Run mechanics-based coupled iteration", type="primary", key="run_coupled_v4"):
-                base_design = st.session_state.wood_storeys.iloc[0].to_dict()
-                target_length = float(clean_walls.loc[clean_walls["Wall Name"].eq(c_wall), "Wall Length (m)"].iloc[0])
+            st.markdown("### 1. Assign a mechanics design to every wall")
+            st.caption(
+                "Wall length is synchronized from the diaphragm model. Edit the physical design of each wall here. "
+                "The lateral force is not an input: it is taken from the current diaphragm solution at every global iteration."
+            )
+
+            panel_types = sorted(SHEATHING_BV["Panel Type"].unique().tolist())
+            panel_thicks = sorted(SHEATHING_BV["Thickness (mm)"].unique().tolist())
+            species_opts = LUMBER_E["Species"].unique().tolist()
+            grade_opts = LUMBER_E["Grade"].unique().tolist()
+            rod_opts = sorted(set(ROD_GEOMETRY["Strong Rod Standard"].tolist() + ROD_GEOMETRY["Strong Rod High Strength"].tolist()))
+            tud_opts = TAKEUP_DEVICES["Model No."].tolist()
+
+            copy1, copy2 = st.columns([1.0, 1.0])
+            if copy1.button("Copy current Wood Wall Lab design to all walls", use_container_width=True, key="copy_wood_design_all_v6"):
+                reset_designs = build_all_wall_design_table(clean_walls, None, base_design)
+                st.session_state.all_wall_designs_v6 = reset_designs
+                st.session_state.pop("all_wall_design_editor_v6", None)
+                st.rerun()
+            if copy2.button("Resync wall lengths from current diaphragm model", use_container_width=True, key="sync_all_wall_lengths_v6"):
+                st.session_state.all_wall_designs_v6 = build_all_wall_design_table(clean_walls, design_table, base_design)
+                st.session_state.pop("all_wall_design_editor_v6", None)
+                st.rerun()
+
+            edited_designs = st.data_editor(
+                design_table,
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                column_config={
+                    "Couple mechanics": st.column_config.CheckboxColumn("Couple mechanics", help="Checked walls update their stiffness from the wood mechanics model. Unchecked walls retain their current diaphragm stiffness."),
+                    "Wall Name": st.column_config.TextColumn(disabled=True),
+                    "Direction": st.column_config.TextColumn(disabled=True),
+                    "Height (m)": st.column_config.NumberColumn(format="%.3f", min_value=0.1),
+                    "Wall length (m)": st.column_config.NumberColumn(format="%.3f", disabled=True),
+                    "Panel Type": st.column_config.SelectboxColumn(options=panel_types, required=True),
+                    "Panel thickness (mm)": st.column_config.SelectboxColumn(options=panel_thicks, required=True),
+                    "Panel sides": st.column_config.SelectboxColumn(options=["S.S", "B.S"], required=True),
+                    "Nail diameter (mm)": st.column_config.NumberColumn(format="%.3f", min_value=0.1),
+                    "Nail spacing (mm)": st.column_config.NumberColumn(format="%.1f", min_value=1.0),
+                    "Species": st.column_config.SelectboxColumn(options=species_opts, required=True),
+                    "Grade": st.column_config.SelectboxColumn(options=grade_opts, required=True),
+                    "Stud size": st.column_config.SelectboxColumn(options=list(STUD_DEPTH_MM.keys()), required=True),
+                    "Chord studs / end": st.column_config.NumberColumn(format="%d", min_value=1, step=1),
+                    "Rod model": st.column_config.SelectboxColumn(options=rod_opts, required=True),
+                    "Take-up device": st.column_config.SelectboxColumn(options=tud_opts, required=True),
+                    "Service dead line load (kN/m)": st.column_config.NumberColumn(format="%.3f", min_value=0.0),
+                    "Service live line load (kN/m)": st.column_config.NumberColumn(format="%.3f", min_value=0.0),
+                },
+                key="all_wall_design_editor_v6",
+            )
+            # Always enforce current building identity / geometry after the editor returns.
+            edited_designs = build_all_wall_design_table(clean_walls, edited_designs, base_design)
+            st.session_state.all_wall_designs_v6 = edited_designs.copy()
+
+            coupled_names = edited_designs.loc[edited_designs["Couple mechanics"].fillna(False), "Wall Name"].astype(str).tolist()
+            fixed_names = edited_designs.loc[~edited_designs["Couple mechanics"].fillna(False), "Wall Name"].astype(str).tolist()
+            dsum1, dsum2 = st.columns(2)
+            dsum1.success(f"Mechanics-coupled walls: {', '.join(coupled_names) if coupled_names else 'None'}")
+            dsum2.info(f"Fixed-stiffness walls: {', '.join(fixed_names) if fixed_names else 'None'}")
+            a1, a2, a3 = st.columns(3)
+            a1.metric("Live-load fraction in compression", f"{float(st.session_state.wood_live_fraction):.2f}")
+            a2.metric("Symmetric cavity allowance", f"{float(st.session_state.wood_cavity_mm):.1f} mm")
+            a3.metric("Compression bearing length", f"{float(st.session_state.wood_bearing_length_mm):.1f} mm")
+            st.caption("These three mechanics assumptions are controlled in Wood Wall Lab → Serviceability / geometry assumptions and are applied consistently to every mechanics-coupled wall.")
+
+            st.markdown("### 2. Global iteration settings")
+            ci1, ci2, ci3, ci4, ci5 = st.columns(5)
+            c_load = ci1.selectbox("Load direction", ["X", "Y"], key="all_coupled_load_v6")
+            c_case = ci2.selectbox("Simultaneous accidental-eccentricity case", ["+ accidental eccentricity", "− accidental eccentricity"], key="all_coupled_case_v6")
+            c_tol_pct = ci3.number_input("Convergence tolerance (%)", min_value=0.01, max_value=10.0, value=0.5, step=0.1, key="all_coupled_tol_v6")
+            c_relax = ci4.number_input("Relaxation factor", min_value=0.05, max_value=1.0, value=0.7, step=0.05, key="all_coupled_relax_v6")
+            cmax = ci5.number_input("Maximum iterations", min_value=2, max_value=100, value=40, step=1, key="all_coupled_max_v6")
+
+            min_force = st.number_input(
+                "Minimum |wall force| required to update mechanics stiffness (kN)",
+                min_value=0.0, value=0.10, step=0.05, key="all_coupled_min_force_v6",
+                help="If a coupled wall has essentially zero force in the selected simultaneous case, a service-load secant stiffness V/Δ cannot be meaningfully updated from that case. The app retains that wall's previous stiffness and flags it."
+            )
+
+            render_model_snapshot(
+                clean_walls, settings, result, c_load, c_case,
+                heading="Current model before Method 4 iteration", show_force_bars=False, compact=True,
+            )
+
+            if not coupled_names:
+                st.error("Select at least one wall under 'Couple mechanics'.")
+            elif st.button("Run Method 4 - fully coupled all-wall iteration", type="primary", key="run_all_coupled_v6"):
                 walls_it = clean_walls.copy()
                 baseline_walls = clean_walls.copy()
-                k_used = float(walls_it.loc[walls_it["Wall Name"].eq(c_wall), "k (kN/m)"].iloc[0])
-                hist_rows = []
-                system_rows = []
-                wall_state_rows = []
-                prev_force = None
+                designs_lookup = edited_designs.set_index("Wall Name", drop=False)
+                hist_rows: list[dict] = []
+                system_rows: list[dict] = []
+                wall_state_rows: list[dict] = []
                 converged = False
                 total_F = float(Fx if c_load == "X" else Fy)
+                tol = float(c_tol_pct) / 100.0
 
-                def capture_state(state_no: int, phase: str, walls_snapshot: pd.DataFrame, rr_snapshot: Dict[str, object]):
-                    view_tbl, case_label = force_table_for_view(rr_snapshot, c_load, global_case_mode)
+                def capture_all_state(state_no: int, phase: str, walls_snapshot: pd.DataFrame, rr_snapshot: Dict[str, object]):
+                    view_tbl, case_label = force_table_for_view(rr_snapshot, c_load, c_case)
                     props = rr_snapshot["properties"]
-                    selected_row = view_tbl.loc[view_tbl["Wall Name"].eq(c_wall)].iloc[0]
-                    signed_col = f"{c_load}-load governing signed V (kN)"
-                    abs_col = f"{c_load}-load envelope |V| (kN)"
-                    selected_k = float(walls_snapshot.loc[walls_snapshot["Wall Name"].eq(c_wall), "k (kN/m)"].iloc[0])
                     system_rows.append({
                         "State": state_no, "Phase": phase, "Load Direction": c_load, "Force View": case_label,
-                        "Selected Wall": c_wall, "Selected k (kN/m)": selected_k,
-                        "Selected signed V (kN)": float(selected_row[signed_col]),
-                        "Selected |V| (kN)": abs(float(selected_row[signed_col])),
                         "Xcr (m)": float(props["Xcr"]), "Ycr (m)": float(props["Ycr"]),
                         "ex (m)": float(props["ex_signed"]), "ey (m)": float(props["ey_signed"]),
                         "J (kN·m)": float(props["J"]),
                     })
+                    signed_col = f"{c_load}-load governing signed V (kN)"
                     wall_lookup = walls_snapshot.set_index("Wall Name")
                     for _, vr in view_tbl.iterrows():
                         name = str(vr["Wall Name"])
@@ -1410,148 +1621,218 @@ def main() -> None:
                             "Wall Length (m)": float(wr["Wall Length (m)"]), "k (kN/m)": float(wr["k (kN/m)"]),
                             "Signed V (kN)": vv, "|V| (kN)": abs(vv),
                             "Force share V/F": vv / total_F if abs(total_F) > 1e-12 else np.nan,
-                            "Is selected wall": name == c_wall,
+                            "Mechanics coupled": bool(name in coupled_names),
                         })
                     return view_tbl
 
-                # State 0 = exact pre-iteration baseline.
                 rr_current = analyze_model(walls_it, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
-                capture_state(0, "Baseline", walls_it.copy(), rr_current)
+                capture_all_state(0, "Baseline", walls_it.copy(), rr_current)
 
                 for it in range(1, int(cmax) + 1):
-                    # Current state force drives the mechanics model.
-                    view_tbl, _case_label = force_table_for_view(rr_current, c_load, global_case_mode)
-                    view_row = view_tbl.loc[view_tbl["Wall Name"].eq(c_wall)].iloc[0]
-                    Vwall = abs(float(view_row[f"{c_load}-load governing signed V (kN)"]))
-                    wr = single_storey_mechanics_k(
-                        base_design, Vwall, wall_length_m=target_length,
-                        live_fraction=float(st.session_state.wood_live_fraction),
-                        cavity_mm=float(st.session_state.wood_cavity_mm),
-                        bearing_length_mm=float(st.session_state.wood_bearing_length_mm),
-                    )
-                    k_model = float(wr["k secant (kN/m)"])
-                    k_next = float(c_relax) * k_model + (1.0 - float(c_relax)) * k_used
-                    dk = abs(k_next - k_used) / max(abs(k_used), 1e-9)
-                    dv = np.nan if prev_force is None else abs(Vwall - prev_force) / max(abs(prev_force), 1e-9)
-                    hist_rows.append({
-                        "Iteration": it, "Wall force |V| (kN)": Vwall, "k used (kN/m)": k_used,
-                        "k from mechanics model (kN/m)": k_model, "k next (kN/m)": k_next,
-                        "Relative Δk": dk, "Relative ΔV": dv,
-                        "Wall deflection (mm)": float(wr["Δ total inter-storey (mm)"]),
-                        "Δ bending (mm)": float(wr["Δ bending (mm)"]),
-                        "Δ panel shear (mm)": float(wr["Δ panel shear (mm)"]),
-                        "Δ nail slip (mm)": float(wr["Δ nail slip (mm)"]),
-                        "Δ anchorage (mm)": float(wr["Δ anchorage (mm)"]),
-                        "Δ rotation from below (mm)": float(wr["Δ rotation from below (mm)"]),
-                    })
+                    view_tbl, case_label = force_table_for_view(rr_current, c_load, c_case)
+                    signed_col = f"{c_load}-load governing signed V (kN)"
+                    force_lookup = {str(r["Wall Name"]): abs(float(r[signed_col])) for _, r in view_tbl.iterrows()}
+                    current_k_lookup = walls_it.set_index("Wall Name")["k (kN/m)"].astype(float).to_dict()
 
-                    # Apply the relaxed stiffness, solve the whole diaphragm again, and save the new full-system state.
-                    walls_it.loc[walls_it["Wall Name"].eq(c_wall), "k (kN/m)"] = k_next
+                    proposed_k: dict[str, float] = dict(current_k_lookup)
+                    mechanics_rows_this_it: list[dict] = []
+                    residuals = []
+                    force_changes = []
+
+                    # IMPORTANT: every mechanics wall is evaluated from the SAME current diaphragm state.
+                    # No wall stiffness is applied until all wall mechanics calculations are complete.
+                    for name in coupled_names:
+                        Vwall = float(force_lookup[name])
+                        k_used = float(current_k_lookup[name])
+                        design = designs_lookup.loc[name]
+
+                        if Vwall < float(min_force):
+                            mechanics_rows_this_it.append({
+                                "Iteration": it, "Wall Name": name, "|V| (kN)": Vwall,
+                                "k used (kN/m)": k_used, "k mechanics (kN/m)": np.nan,
+                                "k next (kN/m)": k_used, "Mechanics residual |k_model-k|/k": np.nan,
+                                "Relaxed step |Δk|/k": 0.0, "Relative ΔV": np.nan,
+                                "Status": f"Retained k: |V| < {float(min_force):.3f} kN",
+                            })
+                            continue
+
+                        storey_row = design_row_to_storey_row(design, Vwall)
+                        wr = single_storey_mechanics_k(
+                            storey_row, Vwall, wall_length_m=float(design["Wall length (m)"]),
+                            live_fraction=float(st.session_state.wood_live_fraction),
+                            cavity_mm=float(st.session_state.wood_cavity_mm),
+                            bearing_length_mm=float(st.session_state.wood_bearing_length_mm),
+                        )
+                        k_model = float(wr["k secant (kN/m)"])
+                        if not np.isfinite(k_model) or k_model <= 0:
+                            raise ValueError(f"{name}: mechanics model returned invalid stiffness {k_model} kN/m at |V|={Vwall:.4f} kN.")
+                        k_next = float(c_relax) * k_model + (1.0 - float(c_relax)) * k_used
+                        residual_k = abs(k_model - k_used) / max(abs(k_used), 1e-9)
+                        step_k = abs(k_next - k_used) / max(abs(k_used), 1e-9)
+                        proposed_k[name] = k_next
+                        residuals.append(residual_k)
+                        mechanics_rows_this_it.append({
+                            "Iteration": it, "Wall Name": name, "|V| (kN)": Vwall,
+                            "k used (kN/m)": k_used, "k mechanics (kN/m)": k_model,
+                            "k next (kN/m)": k_next, "Mechanics residual |k_model-k|/k": residual_k,
+                            "Relaxed step |Δk|/k": step_k, "Relative ΔV": np.nan,
+                            "Wall deflection (mm)": float(wr["Δ total inter-storey (mm)"]),
+                            "Δ bending (mm)": float(wr["Δ bending (mm)"]),
+                            "Δ panel shear (mm)": float(wr["Δ panel shear (mm)"]),
+                            "Δ nail slip (mm)": float(wr["Δ nail slip (mm)"]),
+                            "Δ anchorage (mm)": float(wr["Δ anchorage (mm)"]),
+                            "Δ rotation from below (mm)": float(wr["Δ rotation from below (mm)"]),
+                            "Lc (m)": float(wr["Lc (mm)"]) / 1000.0,
+                            "Status": "Updated",
+                        })
+
+                    # All relaxed stiffnesses are committed SIMULTANEOUSLY here.
+                    for name, kval in proposed_k.items():
+                        walls_it.loc[walls_it["Wall Name"].eq(name), "k (kN/m)"] = float(kval)
+
                     rr_next = analyze_model(walls_it, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
-                    capture_state(it, f"After iteration {it}", walls_it.copy(), rr_next)
+                    capture_all_state(it, f"After iteration {it}", walls_it.copy(), rr_next)
 
-                    is_converged = dk < float(c_tol_pct)/100.0 and (prev_force is not None and dv < float(c_tol_pct)/100.0)
-                    prev_force = Vwall
-                    k_used = k_next
+                    # Compare the newly solved diaphragm force with the force that drove this mechanics update.
+                    next_view, _ = force_table_for_view(rr_next, c_load, c_case)
+                    next_force_lookup = {str(r["Wall Name"]): abs(float(r[signed_col])) for _, r in next_view.iterrows()}
+                    for mr in mechanics_rows_this_it:
+                        name = str(mr["Wall Name"])
+                        v0 = float(force_lookup[name])
+                        v1 = float(next_force_lookup[name])
+                        dv_step = abs(v1 - v0) / max(abs(v0), 1e-9)
+                        mr["Next |V| (kN)"] = v1
+                        mr["Relative ΔV"] = dv_step
+                        force_changes.append(dv_step)
+                    hist_rows.extend(mechanics_rows_this_it)
+
+                    max_resid = max(residuals) if residuals else np.nan
+                    max_dv = max(force_changes) if force_changes else np.nan
+                    system_rows[-1]["Max mechanics stiffness residual"] = max_resid
+                    system_rows[-1]["Max relative force change"] = max_dv
+
+                    is_converged = (
+                        bool(residuals) and np.isfinite(max_resid) and max_resid < tol and
+                        np.isfinite(max_dv) and max_dv < tol
+                    )
                     rr_current = rr_next
                     if is_converged:
                         converged = True
                         break
 
-                st.session_state.coupled_hist_v4 = pd.DataFrame(hist_rows)
-                st.session_state.coupled_system_states_v4 = pd.DataFrame(system_rows)
-                st.session_state.coupled_wall_states_v4 = pd.DataFrame(wall_state_rows)
-                st.session_state.coupled_initial_walls_v4 = baseline_walls.copy()
-                st.session_state.coupled_final_walls_v4 = walls_it.copy()
-                st.session_state.coupled_converged_v4 = converged
-                st.session_state.coupled_load_v4_saved = c_load
-                st.session_state.coupled_case_mode_v4_saved = global_case_mode
+                hist_df = pd.DataFrame(hist_rows)
+                system_df = pd.DataFrame(system_rows)
+                wall_states_df = pd.DataFrame(wall_state_rows)
+                st.session_state.all_coupled_hist_v6 = hist_df
+                st.session_state.all_coupled_system_states_v6 = system_df
+                st.session_state.all_coupled_wall_states_v6 = wall_states_df
+                st.session_state.all_coupled_initial_walls_v6 = baseline_walls.copy()
+                st.session_state.all_coupled_final_walls_v6 = walls_it.copy()
+                st.session_state.all_coupled_designs_v6 = edited_designs.copy()
+                st.session_state.all_coupled_converged_v6 = converged
+                st.session_state.all_coupled_load_v6_saved = c_load
+                st.session_state.all_coupled_case_v6_saved = c_case
 
-            if "coupled_hist_v4" in st.session_state:
-                hist = st.session_state.coupled_hist_v4
-                system_states = st.session_state.coupled_system_states_v4
-                wall_states = st.session_state.coupled_wall_states_v4
-                saved_load = st.session_state.get("coupled_load_v4_saved", c_load)
-                saved_case = st.session_state.get("coupled_case_mode_v4_saved", global_case_mode)
-                saved_wall = str(system_states.iloc[0]["Selected Wall"])
+            if "all_coupled_hist_v6" in st.session_state:
+                hist = st.session_state.all_coupled_hist_v6
+                system_states = st.session_state.all_coupled_system_states_v6
+                wall_states = st.session_state.all_coupled_wall_states_v6
+                saved_load = st.session_state.get("all_coupled_load_v6_saved", c_load)
+                saved_case = st.session_state.get("all_coupled_case_v6_saved", c_case)
+                final_walls = st.session_state.all_coupled_final_walls_v6
+                initial_walls = st.session_state.all_coupled_initial_walls_v6
 
-                if st.session_state.get("coupled_converged_v4", False):
-                    st.success(f"Converged in {len(hist)} iterations. Final relaxed k = {float(hist.iloc[-1]['k next (kN/m)']):,.0f} kN/m.")
+                iterations_done = int(hist["Iteration"].max()) if not hist.empty else 0
+                if st.session_state.get("all_coupled_converged_v6", False):
+                    st.success(f"Method 4 converged globally in {iterations_done} iterations. All updated wall stiffnesses and wall forces satisfied the selected tolerance.")
                 else:
-                    st.warning(f"Maximum iterations reached. Last relaxed k = {float(hist.iloc[-1]['k next (kN/m)']):,.0f} kN/m.")
+                    st.warning(f"Method 4 stopped after {iterations_done} iterations without satisfying the global convergence tolerance for every participating wall.")
 
-                st.markdown("### 1. Convergence")
-                cpa, cpb = st.columns(2)
-                with cpa:
-                    st.pyplot(draw_line_chart(hist, "Iteration", ["k used (kN/m)", "k from mechanics model (kN/m)"], "Stiffness convergence", "Iteration", "k (kN/m)"), clear_figure=True)
-                with cpb:
-                    st.pyplot(draw_line_chart(hist, "Iteration", ["Wall force |V| (kN)"], "Selected-wall force convergence", "Iteration", "Force (kN)"), clear_figure=True)
+                st.markdown("### 3. Global convergence")
+                updated_hist = hist.loc[hist["Status"].eq("Updated")].copy() if "Status" in hist.columns else hist.copy()
+                if not updated_hist.empty:
+                    k_used_wide = updated_hist.pivot(index="Iteration", columns="Wall Name", values="k used (kN/m)").reset_index()
+                    k_model_wide = updated_hist.pivot(index="Iteration", columns="Wall Name", values="k mechanics (kN/m)").reset_index()
+                    force_wide_hist = updated_hist.pivot(index="Iteration", columns="Wall Name", values="|V| (kN)").reset_index()
+                    g1, g2 = st.columns(2)
+                    with g1:
+                        k_cols = [c for c in k_used_wide.columns if c != "Iteration"]
+                        st.pyplot(draw_line_chart(k_used_wide, "Iteration", k_cols, "All coupled wall stiffnesses used by diaphragm", "Iteration", "k (kN/m)"), clear_figure=True, use_container_width=True)
+                    with g2:
+                        v_cols = [c for c in force_wide_hist.columns if c != "Iteration"]
+                        st.pyplot(draw_line_chart(force_wide_hist, "Iteration", v_cols, "All coupled wall forces", "Iteration", "|V| (kN)"), clear_figure=True, use_container_width=True)
 
-                st.markdown("### 2. Whole-building response through the iteration")
-                full_a, full_b = st.columns(2)
-                with full_a:
-                    st.pyplot(
-                        draw_cr_trajectory(st.session_state.coupled_final_walls_v4, Lx, Ly, system_states, Xcm, Ycm),
-                        clear_figure=True, use_container_width=True,
-                    )
-                with full_b:
-                    force_wide = wall_states.pivot(index="State", columns="Wall Name", values="Signed V (kN)").reset_index()
-                    force_cols = [c for c in force_wide.columns if c != "State"]
-                    st.pyplot(draw_line_chart(force_wide, "State", force_cols, "Every wall force during coupled iteration", "Coupled state", "Signed wall force (kN)"), clear_figure=True, use_container_width=True)
+                    # Compatibility residuals make it obvious whether k_model and k_used have truly converged.
+                    compat = updated_hist.pivot(index="Iteration", columns="Wall Name", values="Mechanics residual |k_model-k|/k").reset_index()
+                    compat_cols = [c for c in compat.columns if c != "Iteration"]
+                    st.pyplot(draw_line_chart(compat, "Iteration", compat_cols, "Mechanics compatibility residual by wall", "Iteration", "|k_model-k_used| / k_used"), clear_figure=True, use_container_width=True)
 
-                st.markdown("### 3. Initial vs converged system")
+                st.markdown("### 4. Whole-building response")
+                rr_final = analyze_model(final_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                whole1, whole2 = st.columns(2)
+                with whole1:
+                    st.pyplot(draw_cr_trajectory(final_walls, Lx, Ly, system_states, Xcm, Ycm), clear_figure=True, use_container_width=True)
+                with whole2:
+                    full_force_wide = wall_states.pivot(index="State", columns="Wall Name", values="Signed V (kN)").reset_index()
+                    cols = [c for c in full_force_wide.columns if c != "State"]
+                    st.pyplot(draw_line_chart(full_force_wide, "State", cols, "Every wall force through Method 4", "Coupled state", "Signed V (kN)"), clear_figure=True, use_container_width=True)
+
                 before_after = coupled_force_change_table(wall_states)
-                ba1, ba2 = st.columns([1.0, 1.0])
-                with ba1:
+                b1, b2 = st.columns([1.0, 1.0])
+                with b1:
                     st.pyplot(draw_before_after_force_bars(wall_states), clear_figure=True, use_container_width=True)
-                with ba2:
+                with b2:
                     initial_state = system_states.iloc[0]
                     final_state = system_states.iloc[-1]
-                    cr_shift = math.hypot(float(final_state["Xcr (m)"]-initial_state["Xcr (m)"]), float(final_state["Ycr (m)"]-initial_state["Ycr (m)"]))
+                    cr_shift = math.hypot(float(final_state["Xcr (m)"] - initial_state["Xcr (m)"]), float(final_state["Ycr (m)"] - initial_state["Ycr (m)"]))
                     st.metric("CR movement", f"{cr_shift:.3f} m")
-                    st.metric("Initial selected k", f"{float(initial_state['Selected k (kN/m)']):,.0f} kN/m")
-                    st.metric("Final selected k", f"{float(final_state['Selected k (kN/m)']):,.0f} kN/m")
-                    st.metric("Initial selected |V|", f"{float(initial_state['Selected |V| (kN)']):.2f} kN")
-                    st.metric("Final selected |V|", f"{float(final_state['Selected |V| (kN)']):.2f} kN")
+                    st.metric("Initial Xcr", f"{float(initial_state['Xcr (m)']):.3f} m")
+                    st.metric("Final Xcr", f"{float(final_state['Xcr (m)']):.3f} m")
+                    st.metric("Initial J", f"{float(initial_state['J (kN·m)']):,.0f} kN·m")
+                    st.metric("Final J", f"{float(final_state['J (kN·m)']):,.0f} kN·m")
+                st.dataframe(before_after.round(4), hide_index=True, use_container_width=True)
 
-                st.dataframe(before_after.round(3), hide_index=True, use_container_width=True)
+                st.markdown("### 5. Initial vs converged diaphragm")
+                initial_result = analyze_model(initial_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                final_result = analyze_model(final_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
+                iview, ilabel = force_table_for_view(initial_result, saved_load, saved_case)
+                fview, flabel = force_table_for_view(final_result, saved_load, saved_case)
+                p1, p2 = st.columns(2)
+                with p1:
+                    st.pyplot(draw_plan_with_forces(initial_walls, Lx, Ly, initial_result["properties"], iview, saved_load, case_label="initial " + ilabel, figsize=(8.2, 4.9)), clear_figure=True, use_container_width=True)
+                with p2:
+                    st.pyplot(draw_plan_with_forces(final_walls, Lx, Ly, final_result["properties"], fview, saved_load, case_label="Method 4 converged " + flabel, figsize=(8.2, 4.9)), clear_figure=True, use_container_width=True)
 
-                st.markdown("### 4. Before / after plan comparison")
-                try:
-                    initial_walls = st.session_state.coupled_initial_walls_v4
-                    final_walls = st.session_state.coupled_final_walls_v4
-                    initial_result = analyze_model(initial_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
-                    final_result = analyze_model(final_walls, Lx, Ly, Xcm, Ycm, Fx, Fy, acc)
-                    iview, ilabel = force_table_for_view(initial_result, saved_load, saved_case)
-                    fview, flabel = force_table_for_view(final_result, saved_load, saved_case)
-                    pp1, pp2 = st.columns(2)
-                    with pp1:
-                        st.pyplot(draw_plan_with_forces(initial_walls, Lx, Ly, initial_result["properties"], iview, saved_load, selected_wall=saved_wall, case_label="initial " + ilabel, figsize=(8.2, 4.9)), clear_figure=True, use_container_width=True)
-                    with pp2:
-                        st.pyplot(draw_plan_with_forces(final_walls, Lx, Ly, final_result["properties"], fview, saved_load, selected_wall=saved_wall, case_label="converged " + flabel, figsize=(8.2, 4.9)), clear_figure=True, use_container_width=True)
-                except Exception as exc:
-                    st.warning(f"Before/after plan comparison unavailable: {exc}")
+                st.markdown("### 6. Final mechanics compatibility by wall")
+                if not updated_hist.empty:
+                    final_it = int(updated_hist["Iteration"].max())
+                    final_compat = updated_hist.loc[updated_hist["Iteration"].eq(final_it)].copy()
+                    compat_cols_show = [
+                        "Wall Name", "|V| (kN)", "k used (kN/m)", "k mechanics (kN/m)", "k next (kN/m)",
+                        "Mechanics residual |k_model-k|/k", "Relative ΔV", "Wall deflection (mm)",
+                        "Δ bending (mm)", "Δ panel shear (mm)", "Δ nail slip (mm)", "Δ anchorage (mm)", "Lc (m)", "Status",
+                    ]
+                    st.dataframe(final_compat[[c for c in compat_cols_show if c in final_compat.columns]].round(6), hide_index=True, use_container_width=True)
 
-                with st.expander("Iteration calculation table", expanded=False):
-                    st.dataframe(hist.round(6), hide_index=True, use_container_width=True)
+                with st.expander("Full wall-by-wall mechanics iteration table", expanded=False):
+                    st.dataframe(hist.round(6), hide_index=True, use_container_width=True, height=460)
                 with st.expander("Full system-state table", expanded=False):
                     st.dataframe(system_states.round(6), hide_index=True, use_container_width=True)
                 with st.expander("Every wall at every coupled state", expanded=False):
-                    st.dataframe(wall_states.round(6), hide_index=True, use_container_width=True, height=420)
+                    st.dataframe(wall_states.round(6), hide_index=True, use_container_width=True, height=460)
+                with st.expander("Wall design assignments used", expanded=False):
+                    st.dataframe(st.session_state.all_coupled_designs_v6, hide_index=True, use_container_width=True)
 
-                st.markdown("### 5. Export this coupled study")
-                ex1, ex2, ex3 = st.columns(3)
-                ex1.download_button("Iteration history CSV", hist.to_csv(index=False).encode("utf-8"), file_name="coupled_iteration_history.csv", mime="text/csv", use_container_width=True)
-                ex2.download_button("System states CSV", system_states.to_csv(index=False).encode("utf-8"), file_name="coupled_system_states.csv", mime="text/csv", use_container_width=True)
-                ex3.download_button("All wall states CSV", wall_states.to_csv(index=False).encode("utf-8"), file_name="coupled_wall_states.csv", mime="text/csv", use_container_width=True)
+                st.markdown("### 7. Export / apply Method 4 solution")
+                ex1, ex2, ex3, ex4 = st.columns(4)
+                ex1.download_button("Mechanics history CSV", hist.to_csv(index=False).encode("utf-8"), file_name="method4_all_wall_mechanics_history.csv", mime="text/csv", use_container_width=True)
+                ex2.download_button("System states CSV", system_states.to_csv(index=False).encode("utf-8"), file_name="method4_system_states.csv", mime="text/csv", use_container_width=True)
+                ex3.download_button("Wall states CSV", wall_states.to_csv(index=False).encode("utf-8"), file_name="method4_all_wall_states.csv", mime="text/csv", use_container_width=True)
+                ex4.download_button("Wall designs CSV", st.session_state.all_coupled_designs_v6.to_csv(index=False).encode("utf-8"), file_name="method4_wall_designs.csv", mime="text/csv", use_container_width=True)
 
-                if saved_case.startswith("Envelope"):
-                    st.caption("The selected force view is a wall-by-wall design envelope. Individual wall maxima are not necessarily simultaneous. For a physical iteration narrative, use one + or − accidental-eccentricity case.")
-
-                if st.button("Use converged wall stiffness in main system", key="apply_coupled_v4"):
-                    st.session_state.walls = st.session_state.coupled_final_walls_v4.copy()
+                if st.button("Apply Method 4 converged stiffnesses to main system", type="primary", key="apply_all_coupled_v6"):
+                    st.session_state.walls = final_walls.copy()
                     st.rerun()
-
 
     # ------------------------------------------------------------------
     # Validation and export
@@ -1595,8 +1876,14 @@ def main() -> None:
         studies = {}
         for key, state_key in [
             ("Geometry", "geo_df"), ("Stiffness", "stiff_df"), ("Length_Fixed_k", "length_fixed_df"),
-            ("Length_Calc_k", "length_calc_df"), ("Interaction", "heat_df"), ("Coupled_History", "coupled_hist_v4"),
-            ("Coupled_System_States", "coupled_system_states_v4"), ("Coupled_Wall_States", "coupled_wall_states_v4")
+            ("Length_Calc_k", "length_calc_df"), ("Interaction", "heat_df"),
+            ("Method4_Mechanics_History", "all_coupled_hist_v6"),
+            ("Method4_System_States", "all_coupled_system_states_v6"),
+            ("Method4_Wall_States", "all_coupled_wall_states_v6"),
+            ("Method4_Wall_Designs", "all_coupled_designs_v6"),
+            ("Legacy_Coupled_History", "coupled_hist_v4"),
+            ("Legacy_Coupled_System", "coupled_system_states_v4"),
+            ("Legacy_Coupled_Walls", "coupled_wall_states_v4")
         ]:
             if state_key in st.session_state:
                 studies[key] = st.session_state[state_key]
@@ -1616,7 +1903,7 @@ def main() -> None:
         )
 
     st.divider()
-    st.caption("Research Lab Mechanics V4 - coupled iterations retain CR trajectory and every wall force at every state for reporting and validation.")
+    st.caption("Research Lab Mechanics V6 - Method 4 updates all participating wood-wall stiffnesses simultaneously and retains full mechanics, CR and wall-force history for validation and reporting.")
 
 
 if __name__ == "__main__":
