@@ -57,6 +57,42 @@ def normalize_walls(walls: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def length_proportional_stiffness_model(walls: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, float]:
+    """Return a solver-compatible model with relative stiffness proportional to wall length.
+
+    This implements the preliminary rigid-diaphragm assumption k_i ∝ L_i used in
+    CWC/FPInnovations design examples.  Only relative stiffness is meaningful.
+    A single common scale factor is chosen so that the sum of mapped k values equals
+    the sum of the current model k values; this leaves the relative-force solution
+    unchanged while keeping the existing solver units/plots convenient.
+
+    The mapped k values are therefore *not* physical mechanics-based stiffnesses.
+    """
+    df = normalize_walls(walls)
+    total_length = float(df["Wall Length (m)"].sum())
+    total_k = float(df["k (kN/m)"].sum())
+    if total_length <= 0 or total_k <= 0:
+        raise ValueError("Wall lengths and current stiffness sum must be positive.")
+
+    scale = total_k / total_length  # common scale; force distribution is invariant to it
+    out = df.copy()
+    out["Original k (kN/m)"] = out["k (kN/m)"]
+    out["Global length weight"] = out["Wall Length (m)"] / total_length
+    out["Direction length sum (m)"] = out.groupby("Direction")["Wall Length (m)"].transform("sum")
+    out["Direction relative stiffness L/ΣL"] = out["Wall Length (m)"] / out["Direction length sum (m)"]
+    out["Length-proportional mapped k (kN/m)"] = scale * out["Wall Length (m)"]
+
+    model = df.copy()
+    model["k (kN/m)"] = out["Length-proportional mapped k (kN/m)"]
+
+    table = out[[
+        "Wall Name", "Direction", "Wall Length (m)",
+        "Original k (kN/m)", "Direction relative stiffness L/ΣL",
+        "Length-proportional mapped k (kN/m)",
+    ]].copy()
+    return model, table, scale
+
+
 def diaphragm_properties(walls: pd.DataFrame, x_cm: float, y_cm: float) -> Tuple[pd.DataFrame, Dict[str, float]]:
     df = normalize_walls(walls)
     df["kx (kN/m)"] = np.where(df["Direction"].eq("X"), df["k (kN/m)"], 0.0)
