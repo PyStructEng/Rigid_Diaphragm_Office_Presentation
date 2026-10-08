@@ -10,6 +10,7 @@ Unit conventions: x,y,L [m]; F,V [kN]; k [kN/m]; J [kN.m]; M [kN.m].
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 import pandas as pd
@@ -173,6 +174,30 @@ def equation_by_sections(result: dict, settings: dict, *, tol=1e-7) -> dict[int,
     return out
 
 
+# Handcalcs emits display wrappers and a full "aligned" environment. Some
+# Streamlit/KaTeX combinations show those verbatim rather than rendering them.
+# Each scalar calculation is therefore normalized to one or more SIMPLE math
+# expressions before passing it to st.latex. Never present the raw environment.
+def latex_math_lines(source: str) -> list[str]:
+    """Return Streamlit/KaTeX-ready lines from a Handcalcs LaTeX block.
+
+    Handcalcs remains the producer of the equations and numerical substitutions;
+    this function only adapts its typesetting wrappers for Streamlit/PDF.
+    """
+    text = str(source).strip()
+    for opener, closer in ((r"\[", r"\]"), (r"\(", r"\)"), ("$$", "$$"), ("$", "$")):
+        if text.startswith(opener) and text.endswith(closer):
+            text = text[len(opener):-len(closer)].strip()
+            break
+    text = re.sub(r"\\(?:begin|end)\{(?:aligned|alignedat|gathered|split|align\*?|equation\*?)\}", "", text)
+    # Handcalcs uses & as alignment markers; that token does not belong in a
+    # single math expression outside the aligned environment.
+    text = text.replace("&", "")
+    # Handcalcs' default line-break token is \\\\[10pt]. Other widths also work.
+    lines = re.split(r"\\\\(?:\[[^\]]*\])?", text)
+    return [line.strip().strip("$").strip() for line in lines if line.strip().strip("$").strip()]
+
+
 def audit_units(result: dict, settings: dict, *, rel_tol=1e-8, abs_tol=1e-7) -> pd.DataFrame:
     """Check important rigid-diaphragm results using dimension-bearing quantities.
 
@@ -210,6 +235,8 @@ def audit_units(result: dict, settings: dict, *, rel_tol=1e-8, abs_tol=1e-7) -> 
             "Unit-aware calculation": val, "Existing solver": float(ref),
             "Absolute difference": abs(val-float(ref)), "Pass": passed})
 
+    # ForAllPeople v3 Physical objects reject augmented assignment (+=).
+    # All cumulative quantities are rebound as new immutable instances.
     sx = 0*k
     sy = 0*k
     wx = 0*kN
@@ -217,10 +244,10 @@ def audit_units(result: dict, settings: dict, *, rel_tol=1e-8, abs_tol=1e-7) -> 
     for _, r in wp.iterrows():
         kx = float(r["kx (kN/m)"]) * k
         ky = float(r["ky (kN/m)"]) * k
-        sx += kx
-        sy += ky
-        wx += ky * (float(r["x (m)"])*m)
-        wy += kx * (float(r["y (m)"])*m)
+        sx = sx + kx
+        sy = sy + ky
+        wx = wx + ky * (float(r["x (m)"])*m)
+        wy = wy + kx * (float(r["y (m)"])*m)
     check("Total X stiffness", sx, k, p["sum_kx"], "kN/m")
     check("Total Y stiffness", sy, k, p["sum_ky"], "kN/m")
     Xcr = wx/sy
@@ -234,7 +261,7 @@ def audit_units(result: dict, settings: dict, *, rel_tol=1e-8, abs_tol=1e-7) -> 
         dx = float(r["x (m)"])*m-Xcr
         dy = float(r["y (m)"])*m-Ycr
         J_i = ky*dx**2+kx*dy**2
-        J += J_i
+        J = J + J_i
         check(f"{r['Wall Name']} — J contribution", J_i, M,
               float(r["ky*xbar^2 (kN·m)"])+float(r["kx*ybar^2 (kN·m)"]), "kN.m")
     check("J torsional stiffness", J, M, p["J"], "kN.m")
@@ -317,7 +344,8 @@ def render_wood_secant_panel(V_kN: float, delta_mm: float, k_expected: float):
         st.caption("V / total deflection = secant stiffness. This is a report of the existing wood mechanics calculation, not a separate design method.")
         try:
             latex, value = wood_secant_trace(V_kN, delta_mm, k_expected)
-            st.latex(latex.strip().removeprefix(r"\[").removesuffix(r"\]"))
+            for math_line in latex_math_lines(latex):
+                st.latex(math_line)
             st.success(f"Handcalcs and ForAllPeople checks agree: k = {value:,.2f} kN/m")
         except ImportError as exc:
             st.warning(f"Install Handcalcs and ForAllPeople to see the equation: {exc}")
