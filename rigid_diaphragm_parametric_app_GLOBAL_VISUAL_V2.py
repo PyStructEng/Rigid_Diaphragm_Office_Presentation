@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from diaphragm_calculation_sheet import render_calculation_tab
+from multi_storey_ui import render_multi_storey_tab
 
 from rigid_diaphragm_core import (
     analyze_model,
@@ -554,6 +555,7 @@ def main() -> None:
         "Coupled iteration",
         "Validation & export",
         "Step-by-step calculations",
+        "Multi-storey periods & drift",
     ])
 
     # ------------------------------------------------------------------
@@ -1052,6 +1054,12 @@ def main() -> None:
     # ------------------------------------------------------------------
     with tabs[9]:
         render_calculation_tab(clean_walls, settings, result)
+
+    # ------------------------------------------------------------------
+    # NEW - independent multi-storey diaphragm/mode/drift research solver
+    # ------------------------------------------------------------------
+    with tabs[10]:
+        render_multi_storey_tab(clean_walls, settings)
 
     st.divider()
     st.caption("Research Lab V1 - keep geometry effects, stiffness effects, wall-length effects, and wood-wall property assumptions separated when interpreting results.")
