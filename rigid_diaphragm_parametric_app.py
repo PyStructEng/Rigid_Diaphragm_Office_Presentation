@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from diaphragm_calculation_sheet import render_calculation_tab
+
 from rigid_diaphragm_core import (
     analyze_model,
     benchmark_table,
@@ -52,14 +54,6 @@ from wood_shearwall_mechanics import (
     get_takeup,
     calculate_lc_mm,
     run_mechanics_self_tests,
-)
-
-from wood_parametric_study import (
-    MODEL_VERSION as WOOD_PARAMETRIC_MODEL_VERSION,
-    available_sheathing_pairs,
-    parse_positive_float_list,
-    parametric_workbook_bytes,
-    run_wood_parametric_atlas,
 )
 
 
@@ -861,6 +855,7 @@ def main() -> None:
         "Wood wall lab",
         "Coupled iteration",
         "Validation & export",
+        "Step-by-step calculations",
     ])
 
     # ------------------------------------------------------------------
@@ -1203,234 +1198,44 @@ def main() -> None:
     # Batch suite
     # ------------------------------------------------------------------
     with tabs[5]:
-        core_batch_tab, wood_atlas_tab = st.tabs(["Core diaphragm batch", "Wood shearwall parametric atlas"])
-
-        with core_batch_tab:
-            st.subheader("Core batch research suite")
-            st.caption("Runs the standard controlled diaphragm studies together and stores every case for export.")
-            b1, b2, b3 = st.columns(3)
-            b_wall = b1.selectbox("Research wall", clean_walls["Wall Name"].tolist(), key="batch_wall")
-            b_load = b2.selectbox("Research load direction", ["X", "Y"], key="batch_load")
-            resolution = b3.selectbox("Resolution", ["Fast (~1,100 cases)", "Standard (~4,000 cases)", "Deep (~10,600 cases)"], index=1)
-            if resolution.startswith("Fast"):
-                n_curve, n_grid = 61, 31
-            elif resolution.startswith("Standard"):
-                n_curve, n_grid = 101, 61
-            else:
-                n_curve, n_grid = 151, 101
-            brow = clean_walls.loc[clean_walls["Wall Name"].eq(b_wall)].iloc[0]
-            limit = Lx if brow["Direction"] == "X" else Ly
-            b_lmin = max(0.25, min(float(brow["Wall Length (m)"]) * 0.5, limit * 0.5))
-            b_lmax = max(b_lmin + 0.1, min(limit, float(brow["Wall Length (m)"]) * 1.5))
-            total_est = n_curve * 3 + n_grid**2
-            st.info(f"Planned run count: approximately {total_est:,} analyses.")
-            render_model_snapshot(
-                clean_walls, settings, result, b_load, global_case_mode,
-                selected_wall=b_wall, heading="Research model being sampled", show_force_bars=False, compact=True,
-            )
-            if st.button("Run core research suite", type="primary", key="run_batch"):
-                with st.spinner(f"Running ~{total_est:,} models..."):
-                    suite = {}
-                    suite["Geometry"] = run_geometry_study(clean_walls, settings, b_wall, b_load, n_curve, 0.0, 1.0)
-                    suite["Stiffness"] = run_stiffness_study(clean_walls, settings, b_wall, b_load, n_curve, 0.25, 4.0, True)
-                    suite["Length_Fixed_k"] = run_length_fixed_k_study(clean_walls, settings, b_wall, b_load, b_lmin, b_lmax, n_curve)
-                    suite["Interaction"] = run_interaction_study(clean_walls, settings, b_wall, b_load, n_grid, n_grid, 0.0, 1.0, 0.25, 4.0)
-                    st.session_state.batch_suite = suite
-            if "batch_suite" in st.session_state:
-                suite = st.session_state.batch_suite
-                total_rows = sum(len(v) for v in suite.values())
-                st.success(f"Batch suite complete: {total_rows:,} stored result rows across {len(suite)} studies.")
-                summary = pd.DataFrame([{"Study": k, "Rows": len(v), "Valid rows": int(v.dropna(how="all").shape[0])} for k, v in suite.items()])
-                st.dataframe(summary, hide_index=True, use_container_width=True)
-                batch_xlsx = to_excel_bytes(result, suite)
-                st.download_button("Download batch research workbook", batch_xlsx, file_name="rigid_diaphragm_research_suite.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-        with wood_atlas_tab:
-            st.subheader("Wood shearwall parametric atlas")
-            st.caption(
-                "Builds an analysis-ready service-stiffness database from the mechanics-based Wood Wall Lab. "
-                "The study varies sheathing type, valid panel thickness, panel side, nail spacing, wall geometry and demand, "
-                "while holding the current framing/rod/anchorage assumptions fixed."
-            )
-            st.info(
-                "Research boundary: panel type/thickness pairs are screened against the embedded Bv database, but the atlas does NOT "
-                "check whether a selected nail spacing is a code-permitted wall assembly or whether the wall has adequate factored resistance. "
-                "Use this to study deflection/stiffness mechanics; verify design resistance separately before using a configuration on a project."
-            )
-
-            if int(st.session_state.wood_n_storeys) != 1:
-                st.warning("Set Wood Wall Lab → Number of stacked storeys = 1 before running this atlas. The atlas is intentionally a single-shearwall reference study.")
-            else:
-                base_design = st.session_state.wood_storeys.iloc[0].to_dict()
-                base_cols = [
-                    "Floor lateral force (kN)", "Height (m)", "Wall length (m)", "Panel Type",
-                    "Panel thickness (mm)", "Panel sides", "Nail diameter (mm)", "Nail spacing (mm)",
-                    "Species", "Grade", "Stud size", "Chord studs / end", "Rod model", "Take-up device",
-                ]
-                st.markdown("### 1. Baseline / fixed design")
-                st.caption("All non-swept properties come directly from the current one-storey Wood Wall Lab row.")
-                st.dataframe(pd.DataFrame([base_design])[base_cols], hide_index=True, use_container_width=True)
-
-                all_panel_types = sorted(SHEATHING_BV["Panel Type"].astype(str).unique().tolist())
-                all_thicknesses = sorted(SHEATHING_BV["Thickness (mm)"].astype(float).unique().tolist())
-                default_thicknesses = [x for x in [9.5, 12.5, 15.5, 18.5] if x in all_thicknesses]
-
-                st.markdown("### 2. Construction variables")
-                c1, c2, c3 = st.columns([1.0, 1.3, 0.9])
-                ptypes = c1.multiselect("Panel types", all_panel_types, default=all_panel_types, key="wood_atlas_panel_types_v7")
-                pthicks = c2.multiselect("Panel thicknesses (mm)", all_thicknesses, default=default_thicknesses, key="wood_atlas_thickness_v7")
-                psides = c3.multiselect("Panel sides", ["S.S", "B.S"], default=["S.S", "B.S"], key="wood_atlas_sides_v7")
-                nail_spacing_text = st.text_input(
-                    "Nail spacing research levels (mm)", value="75, 150, 300", key="wood_atlas_nail_spacing_v7",
-                    help="These are study points, not an approval statement. Enter only the spacings you want to investigate."
-                )
-
-                st.markdown("### 3. Geometry and demand matrix")
-                g1, g2, g3 = st.columns(3)
-                heights_text = g1.text_input("Wall heights H (m)", value="2.4, 3.0, 3.6", key="wood_atlas_heights_v7")
-                ar_text = g2.text_input("Aspect ratios H/L", value="0.5, 0.75, 1.0, 1.5, 2.0", key="wood_atlas_ar_v7")
-                demand_mode = g3.selectbox(
-                    "Demand basis",
-                    ["Baseline force multiplier", "Constant unit shear (kN/m)", "Constant total force (kN)"],
-                    key="wood_atlas_demand_mode_v7",
-                )
-                base_force = float(base_design["Floor lateral force (kN)"])
-                base_unit = base_force / float(base_design["Wall length (m)"])
-                if demand_mode == "Baseline force multiplier":
-                    default_demand = "0.25, 0.5, 0.75, 1.0, 1.5"
-                    demand_help = f"1.0 = current Wood Wall Lab force = {base_force:.3f} kN."
-                elif demand_mode == "Constant unit shear (kN/m)":
-                    default_demand = f"{0.5*base_unit:.3f}, {base_unit:.3f}, {1.5*base_unit:.3f}"
-                    demand_help = f"Current baseline unit shear = {base_unit:.3f} kN/m."
-                else:
-                    default_demand = f"{0.5*base_force:.3f}, {base_force:.3f}, {1.5*base_force:.3f}"
-                    demand_help = f"Current baseline total force = {base_force:.3f} kN."
-                demand_text = st.text_input("Demand levels", value=default_demand, key=f"wood_atlas_demand_values_{demand_mode}", help=demand_help)
-
-                parsed_ok = True
-                try:
-                    nail_spacings = parse_positive_float_list(nail_spacing_text, name="Nail spacing")
-                    heights = parse_positive_float_list(heights_text, name="Wall heights")
-                    aspect_ratios = parse_positive_float_list(ar_text, name="Aspect ratios")
-                    demand_levels = parse_positive_float_list(demand_text, name="Demand levels")
-                    valid_pairs = available_sheathing_pairs(ptypes, pthicks)
-                    planned_assemblies = len(valid_pairs) * len(psides) * len(nail_spacings)
-                    planned_cases = planned_assemblies * len(heights) * len(aspect_ratios) * len(demand_levels)
-                except Exception as exc:
-                    parsed_ok = False
-                    planned_assemblies = planned_cases = 0
-                    st.error(f"Study-grid input error: {exc}")
-
-                if parsed_ok:
-                    q1, q2, q3, q4 = st.columns(4)
-                    q1.metric("Valid panel pairs", f"{len(valid_pairs):,}")
-                    q2.metric("Assembly variants", f"{planned_assemblies:,}")
-                    q3.metric("Planned cases", f"{planned_cases:,}")
-                    q4.metric("Atlas model", WOOD_PARAMETRIC_MODEL_VERSION.replace("Wood Shearwall ", ""))
-                    if planned_cases > 25000:
-                        st.warning("This is a large study. Consider reducing one sweep first, then expand after reviewing the initial trends.")
-                    elif planned_cases == 0:
-                        st.warning("Select at least one valid panel type/thickness pair and panel-side condition.")
-                    else:
-                        st.caption("Wall length is generated from L = H/(H/L). This makes aspect ratio an explicit research variable and avoids mixing arbitrary H/L combinations.")
-
-                run_disabled = (not parsed_ok) or planned_cases <= 0
-                if st.button("Run wood shearwall parametric atlas", type="primary", disabled=run_disabled, key="run_wood_atlas_v7"):
-                    with st.spinner(f"Running {planned_cases:,} mechanics cases..."):
-                        study = run_wood_parametric_atlas(
-                            base_design,
-                            panel_types=ptypes,
-                            thicknesses_mm=pthicks,
-                            panel_sides=psides,
-                            nail_spacings_mm=nail_spacings,
-                            heights_m=heights,
-                            aspect_ratios_h_over_l=aspect_ratios,
-                            demand_mode=demand_mode,
-                            demand_levels=demand_levels,
-                            live_load_fraction_in_compression=float(st.session_state.wood_live_fraction),
-                            cavity_mm=float(st.session_state.wood_cavity_mm),
-                            compression_bearing_length_mm=float(st.session_state.wood_bearing_length_mm),
-                        )
-                        st.session_state.wood_parametric_study_v7 = study
-
-                if "wood_parametric_study_v7" in st.session_state:
-                    study = st.session_state.wood_parametric_study_v7
-                    pdata = study["data"]
-                    pok = pdata[pdata["Analysis status"].eq("OK")].copy()
-                    st.markdown("### 4. Completed study")
-                    r1, r2, r3, r4 = st.columns(4)
-                    r1.metric("Stored rows", f"{len(pdata):,}")
-                    r2.metric("Successful", f"{len(pok):,}")
-                    r3.metric("Assemblies", f"{len(study['assemblies']):,}")
-                    if not pok.empty:
-                        r4.metric("k range", f"{pok['k secant (kN/m)'].min():,.0f}–{pok['k secant (kN/m)'].max():,.0f} kN/m")
-                    else:
-                        r4.metric("k range", "—")
-
-                    if not pok.empty:
-                        st.markdown("#### Quick controlled view")
-                        st.caption("Fix geometry, demand and sheathing so the nail-spacing trend is not mixed with other variables. The exported dataset keeps every case for deeper analysis.")
-                        f1, f2, f3, f4 = st.columns(4)
-                        view_H = f1.selectbox("H (m)", sorted(pok["Height (m)"].unique().tolist()), key="wood_atlas_view_H_v7")
-                        view_ar = f2.selectbox("H/L", sorted(pok["Aspect ratio H/L"].unique().tolist()), key="wood_atlas_view_ar_v7")
-                        view_dem = f3.selectbox("Demand level", sorted(pok["Demand level"].unique().tolist()), key="wood_atlas_view_dem_v7")
-                        view_type = f4.selectbox("Panel type", sorted(pok["Panel Type"].unique().tolist()), key="wood_atlas_view_type_v7")
-
-                        view0 = pok[
-                            np.isclose(pok["Height (m)"], float(view_H)) &
-                            np.isclose(pok["Aspect ratio H/L"], float(view_ar)) &
-                            np.isclose(pok["Demand level"], float(view_dem)) &
-                            pok["Panel Type"].eq(view_type)
-                        ].copy()
-                        f5, f6 = st.columns(2)
-                        type_thicks = sorted(view0["Panel thickness (mm)"].unique().tolist())
-                        view_thick = f5.selectbox("Panel thickness (mm)", type_thicks, key="wood_atlas_view_thick_v7")
-                        view_side = f6.selectbox("Panel side", sorted(view0["Panel sides"].unique().tolist()), key="wood_atlas_view_side_v7")
-                        view = view0[np.isclose(view0["Panel thickness (mm)"], float(view_thick)) & view0["Panel sides"].eq(view_side)].sort_values("Nail spacing (mm)")
-
-                        p1, p2 = st.columns(2)
-                        with p1:
-                            st.pyplot(draw_line_chart(view, "Nail spacing (mm)", ["k secant (kN/m)"], "Nail spacing vs secant stiffness", "Nail spacing (mm)", "k (kN/m)"), clear_figure=True)
-                        with p2:
-                            st.pyplot(draw_line_chart(view, "Nail spacing (mm)", ["Bending fraction", "Panel shear fraction", "Nail slip fraction", "Anchorage fraction"], "Where the deformation comes from", "Nail spacing (mm)", "Fraction of total Δ"), clear_figure=True)
-
-                        rank_cols = [
-                            "Assembly ID", "Panel Type", "Panel thickness (mm)", "Panel sides", "Nail spacing (mm)",
-                            "Height (m)", "Wall length (m)", "Aspect ratio H/L", "Demand level", "Wall force V (kN)",
-                            "Δ total inter-storey (mm)", "k secant (kN/m)", "k/L (kN/m²)",
-                            "k / reference same condition", "Bending fraction", "Panel shear fraction", "Nail slip fraction", "Anchorage fraction",
-                        ]
-                        st.dataframe(view[rank_cols].round(6), hide_index=True, use_container_width=True, height=300)
-
-                    st.markdown("### 5. Export analysis-ready data")
-                    st.success("Use the dedicated workbook below for the office archive and for sending the study back to ChatGPT. It contains the raw case table, baseline, assembly catalog, study metadata and a data dictionary.")
-                    workbook = parametric_workbook_bytes(study)
-                    ex1, ex2 = st.columns(2)
-                    ex1.download_button(
-                        "Download ChatGPT-ready parametric workbook",
-                        workbook,
-                        file_name="wood_shearwall_parametric_atlas.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        key="download_wood_atlas_xlsx_v7",
-                    )
-                    ex2.download_button(
-                        "Download raw parametric CSV",
-                        pdata.to_csv(index=False).encode("utf-8"),
-                        file_name="wood_shearwall_parametric_data.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                        key="download_wood_atlas_csv_v7",
-                    )
-                    with st.expander("Exactly what to send to ChatGPT", expanded=False):
-                        st.markdown(
-                            """
-1. Download **wood_shearwall_parametric_atlas.xlsx** after the run.
-2. Upload that workbook in the chat.
-3. Say: **Analyze this wood shearwall parametric study for my rigid-diaphragm presentation. Generate the key graphs, engineering comments, sensitivity ranking, limitations and office-reference conclusions.**
-4. For a second-stage building study, also export the rigid-diaphragm/coupled-iteration workbook so wall-level stiffness trends can be connected to CR shift, torsion and wall-force redistribution.
-                            """
-                        )
+        st.subheader("Core batch research suite")
+        st.caption("Runs the standard controlled studies together and stores every case for export. This is the quickest way to create a repeatable study dataset.")
+        b1, b2, b3 = st.columns(3)
+        b_wall = b1.selectbox("Research wall", clean_walls["Wall Name"].tolist(), key="batch_wall")
+        b_load = b2.selectbox("Research load direction", ["X", "Y"], key="batch_load")
+        resolution = b3.selectbox("Resolution", ["Fast (~1,100 cases)", "Standard (~4,000 cases)", "Deep (~10,600 cases)"], index=1)
+        if resolution.startswith("Fast"):
+            n_curve, n_grid = 61, 31
+        elif resolution.startswith("Standard"):
+            n_curve, n_grid = 101, 61
+        else:
+            n_curve, n_grid = 151, 101
+        brow = clean_walls.loc[clean_walls["Wall Name"].eq(b_wall)].iloc[0]
+        limit = Lx if brow["Direction"] == "X" else Ly
+        b_lmin = max(0.25, min(float(brow["Wall Length (m)"]) * 0.5, limit * 0.5))
+        b_lmax = max(b_lmin + 0.1, min(limit, float(brow["Wall Length (m)"]) * 1.5))
+        total_est = n_curve * 3 + n_grid**2
+        st.info(f"Planned run count: approximately {total_est:,} analyses.")
+        render_model_snapshot(
+            clean_walls, settings, result, b_load, global_case_mode,
+            selected_wall=b_wall, heading="Research model being sampled", show_force_bars=False, compact=True,
+        )
+        if st.button("Run core research suite", type="primary", key="run_batch"):
+            with st.spinner(f"Running ~{total_est:,} models..."):
+                suite = {}
+                suite["Geometry"] = run_geometry_study(clean_walls, settings, b_wall, b_load, n_curve, 0.0, 1.0)
+                suite["Stiffness"] = run_stiffness_study(clean_walls, settings, b_wall, b_load, n_curve, 0.25, 4.0, True)
+                suite["Length_Fixed_k"] = run_length_fixed_k_study(clean_walls, settings, b_wall, b_load, b_lmin, b_lmax, n_curve)
+                suite["Interaction"] = run_interaction_study(clean_walls, settings, b_wall, b_load, n_grid, n_grid, 0.0, 1.0, 0.25, 4.0)
+                st.session_state.batch_suite = suite
+        if "batch_suite" in st.session_state:
+            suite = st.session_state.batch_suite
+            total_rows = sum(len(v) for v in suite.values())
+            st.success(f"Batch suite complete: {total_rows:,} stored result rows across {len(suite)} studies.")
+            summary = pd.DataFrame([{"Study": k, "Rows": len(v), "Valid rows": int(v.dropna(how="all").shape[0])} for k, v in suite.items()])
+            st.dataframe(summary, hide_index=True, use_container_width=True)
+            batch_xlsx = to_excel_bytes(result, suite)
+            st.download_button("Download batch research workbook", batch_xlsx, file_name="rigid_diaphragm_research_suite.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     # ------------------------------------------------------------------
     # Wood wall lab - mechanics based
@@ -2087,11 +1892,6 @@ def main() -> None:
                 studies[key] = st.session_state[state_key]
         if "wood_mechanics_result" in st.session_state:
             studies["Wood_Mechanics"] = st.session_state.wood_mechanics_result
-        if "wood_parametric_study_v7" in st.session_state:
-            _wa = st.session_state.wood_parametric_study_v7
-            studies["Wood_Parametric"] = _wa["data"]
-            studies["Wood_Assemblies"] = _wa["assemblies"]
-            studies["Wood_Atlas_Summary"] = _wa["summary"]
         if "batch_suite" in st.session_state:
             studies.update({f"Batch_{k}": v for k, v in st.session_state.batch_suite.items()})
         xlsx = to_excel_bytes(result, studies)
@@ -2105,8 +1905,14 @@ def main() -> None:
             """
         )
 
+    # ------------------------------------------------------------------
+    # Transparent calculation sheet / printable PDF
+    # ------------------------------------------------------------------
+    with tabs[9]:
+        render_calculation_tab(clean_walls, settings, result)
+
     st.divider()
-    st.caption("Research Lab Mechanics V7 - adds the Wood Shearwall Parametric Atlas with analysis-ready office/ChatGPT export while retaining fully coupled mechanics history.")
+    st.caption("Research Lab Mechanics V6 - Method 4 updates all participating wood-wall stiffnesses simultaneously and retains full mechanics, CR and wall-force history for validation and reporting.")
 
 
 if __name__ == "__main__":
