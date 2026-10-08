@@ -151,3 +151,89 @@ CAUTIONS
 
 The included sample PDF is generated using the application's FPInnovations preset.
 
+
+
+RIGID DIAPHRAGM RESEARCH LAB — HANDCALCS + FORALLPEOPLE INTEGRATION
+=================================================================
+
+BASED ON
+The full Mechanics V6 app with the 10-section calculations tab and PDF export
+prepared on October 8, 2026. Its structural solver has not been rewritten.
+
+WHAT CHANGED
+1. Step-by-step calculations tab: Handcalcs renders real Python scalar
+   expressions with symbolic variables, numerical substitutions and results.
+   It includes direction-specific stiffness share, centres of rigidity,
+   eccentricity, individual wall J, torsional moments, direct and torsional
+   wall forces, final wall-parallel force and unit shear.
+2. Every Handcalcs scalar result is checked numerically against the output of
+   the existing analysis engine. Discrepancies show an error in Streamlit.
+3. ForAllPeople checks physical dimensions and numerical unit conversion for
+   combined directional stiffnesses, Xcr, Ycr, J, four load-case moments,
+   each wall's direct and torsional shear, final force and unit shear.
+   A complete downloadable unit-audit CSV is included in the UI.
+4. The PDF includes both an equation section and the original ALL-wall numeric
+   working and tables. The math is rasterized with Matplotlib for portable PDF
+   generation (no LaTeX / TeX system is required by Streamlit Cloud).
+5. Wood-wall laboratory: an optional display verifies and visualizes the
+   service/seismic secant stiffness k = |V| / delta using both libraries.
+   The stacked mechanics and coupled iteration solver equations are unchanged.
+6. All previous visualization, parameter studies, mechanics, coupled-iteration,
+   benchmark, Excel/CSV exports and both app entrypoint versions are preserved.
+7. Requirements updated to include Handcalcs 1.11.0 and ForAllPeople 3.0.0.
+
+INSTALLATION FOR GITHUB + STREAMLIT CLOUD
+1. Download this ZIP and unzip it.
+2. Save a backup/commit of your existing working repository before copying.
+3. Copy all Python files and requirements.txt into the SAME directory in the
+   repository. Do not change your existing Streamlit Cloud entrypoint name.
+4. If you run the full Mechanics V6 app, use:
+      rigid_diaphragm_parametric_app.py
+   If your deployment is the lighter alternative, use:
+      rigid_diaphragm_parametric_app_GLOBAL_VISUAL_V2.py
+   Both have the same new calculation renderer; choose ONE app entrypoint.
+5. Commit and push changes to GitHub. Streamlit Cloud should install the
+   packages from the new requirements.txt and redeploy.
+6. Open Step-by-step calculations; verify Handcalcs and ForAllPeople pass.
+   Click the PDF download button and print the exported report.
+
+RUN LOCALLY (Python 3.10+)
+   python -m pip install -r requirements.txt
+   python test_calculation_sheet.py
+   python test_upgrade_live.py
+   streamlit run rigid_diaphragm_parametric_app.py
+
+TESTING AND LIMITATIONS
+- Pre-existing baseline regression tests pass: 6/6 structural solver tests,
+  5/5 wood mechanics tests; also checked FPInnovations, symmetric,
+  asymmetric/local-force, signed-negative-load and zero-load models.
+- Offline mocked-dependency tests verified report arithmetic, units and PDF
+  pathways. Run test_upgrade_live.py after installation to test the ACTUAL
+  package versions. Due to restricted network access in the build environment,
+  live third-party-package compatibility was not executed during packaging.
+- Handcalcs is for scalar presentation, not a matrix solver. ForAllPeople is
+  used at validation boundaries, NOT inside NumPy/matrix computation.
+- The report and unit audit do NOT verify code-prescribed accidental
+  eccentricity, model adequacy, CSA design strength, diaphragm rigidity,
+  hold-down loads or connection adequacy. User must verify assumptions.
+- Treat the PDF as an engineering calculation AID, not a sealed design report.
+- On unusually large models, generating every wall's math in the report can
+  take additional seconds. The PDF is cached for unchanged model inputs.
+
+NEW FILES
+   engineering_calculations.py     - unit audits, Handcalcs functions,
+                                     wood stiffness trace
+   test_upgrade_live.py           - genuine library end-to-end test
+
+UPDATED FILES
+   diaphragm_calculation_sheet.py
+   rigid_diaphragm_parametric_app.py
+   rigid_diaphragm_parametric_app_GLOBAL_VISUAL_V2.py
+   requirements.txt
+
+ORIGINAL ENGINEERING MODULES (UNCHANGED)
+   rigid_diaphragm_core.py
+   wood_shearwall_mechanics.py
+   test_calculation_sheet.py
+
+
