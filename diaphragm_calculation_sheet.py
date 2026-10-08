@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 import math
+import re
 
 import pandas as pd
 
@@ -25,6 +26,7 @@ class Section:
     notes: list[str] = field(default_factory=list)
     tables: list[tuple[str, pd.DataFrame]] = field(default_factory=list)
     calculations: list[str] = field(default_factory=list)
+    equations: list[tuple[str, str]] = field(default_factory=list)  # (caption, Handcalcs LaTeX)
 
 
 def f(value: float, places: int = 4) -> str:
@@ -218,39 +220,122 @@ def _display_table(table: pd.DataFrame) -> pd.DataFrame:
     return t
 
 
+def _math_body(latex: str) -> str:
+    """Strip display delimiters; st.latex already supplies math mode."""
+    latex = latex.strip()
+    if latex.startswith(r"\[") and latex.endswith(r"\]"):
+        latex = latex[2:-2].strip()
+    return latex
+
+
+def _latex_formula_png(latex: str, *, dpi: int = 170) -> list[BytesIO]:
+    """Render Handcalcs to portable PDF-ready images without external TeX.
+
+    Matplotlib mathtext does not support full aligned environments. Render each
+    alignment line separately; if a line is too advanced, its textual equation
+    still appears later in the numeric substitutions section.
+    """
+    from matplotlib.mathtext import math_to_image
+    body = _math_body(latex)
+    body = body.replace(r"\begin{aligned}", "").replace(r"\end{aligned}", "")
+    body = body.replace(r"\begin{gathered}", "").replace(r"\end{gathered}", "")
+    body = body.replace("&", "")
+    body = body.replace(r"\text{", r"\mathrm{")
+    chunks = re.split(r"\\\\(?:\[[^\]]*\])?", body)
+    out=[]
+    for chunk in chunks:
+        chunk=chunk.strip().strip("$")
+        if not chunk:
+            continue
+        try:
+            buffer=BytesIO()
+            math_to_image("$" + chunk + "$", buffer, dpi=dpi, format="png", color="#21354A")
+            buffer.seek(0)
+            out.append(buffer)
+        except (ValueError, TypeError):
+            # Preserve the plain-text arithmetic even when mathtext cannot
+            # handle a particular LaTeX macro from a future Handcalcs release.
+            continue
+    return out
+
+
 def render_calculation_tab(walls: pd.DataFrame, settings: dict, result: dict) -> None:
-    """Streamlit UI: one long printable-style educational calculation page."""
+    """Existing ten-section worksheet, enhanced with Handcalcs + unit audit."""
     import streamlit as st
+    from engineering_calculations import equation_by_sections, audit_units
+
     st.subheader("Step-by-step rigid diaphragm calculations")
-    st.caption("The same model and results as the analysis above. Every step and numerical substitution is shown; no second solver is used.")
+    st.caption("Live results from the existing validated solver. Rendered equations provide a second, scalar calculation trace; ForAllPeople checks the dimensions separately.")
     sections = build_calculation_sections(walls, settings, result)
+
     try:
-        pdf = make_calculation_pdf(sections)
-    except ImportError:
-        st.warning("PDF export requires the ReportLab package. Add `reportlab>=4.0` to requirements.txt.")
+        rendered = equation_by_sections(result, settings)
+        for number, equations in rendered.items():
+            sections[number-1].equations.extend(equations)
+        st.success(f"Handcalcs verified {sum(len(x) for x in rendered.values())} rendered arithmetic steps against the active model.")
+    except ImportError as exc:
+        st.warning(f"Handcalcs unavailable ({exc}). Install the packages from requirements.txt. The original worksheet is still available.")
+    except Exception as exc:
+        st.error(f"Equation verification failed: {exc}. The existing solver and plain-text worksheet remain available; check this discrepancy before design use.")
+
+    try:
+        audit = audit_units(result, settings)
+        passed = bool(audit["Pass"].all())
+        if passed:
+            st.success(f"ForAllPeople dimensional and magnitude audit: {len(audit)} / {len(audit)} checks passed.")
+        else:
+            st.error(f"ForAllPeople audit: {int(audit['Pass'].sum())}/{len(audit)} passed. Investigate before design use.")
+        with st.expander("Unit audit details (ForAllPeople)", expanded=not passed):
+            st.dataframe(_display_table(audit), hide_index=True, use_container_width=True)
+            st.download_button("Download unit-audit CSV", audit.to_csv(index=False).encode("utf-8"),
+                               file_name="rigid_diaphragm_unit_audit.csv", mime="text/csv", key="units_audit_csv")
+    except ImportError as exc:
+        st.warning(f"ForAllPeople unavailable ({exc}). Unit checks are not active until the dependencies are installed.")
+    except Exception as exc:
+        st.error(f"Unit audit could not finish: {exc}. Do not regard this model as independently dimension-verified.")
+
+    # A cache avoids repeatedly converting mathematical equations to PDF on
+    # every unrelated Streamlit slider change that leaves this model unchanged.
+    try:
+        import hashlib
+        import pickle
+        @st.cache_data(show_spinner=False, max_entries=6)
+        def _cached_pdf(_detailed_sections: list[Section], fingerprint: str) -> bytes:
+            return make_calculation_pdf(_detailed_sections)
+        signature = hashlib.sha256(pickle.dumps(sections, protocol=4)).hexdigest()
+        pdf = _cached_pdf(sections, signature)
+    except ImportError as exc:
+        st.warning(f"PDF export requires ReportLab and Matplotlib: {exc}")
+    except Exception as exc:
+        st.error(f"PDF generation error: {exc}")
     else:
-        st.download_button(
-            "Download complete calculations (PDF) - ready to print", pdf,
-            file_name="rigid_diaphragm_detailed_calculations.pdf",
-            mime="application/pdf", use_container_width=True,
-            key="rigid_calc_pdf_download",
-        )
-    st.info("Start at Step 01 and read down. The four X/Y and +/- accidental cases are shown independently; the design envelope does not represent one simultaneous force state.")
-    for s in sections:
-        st.markdown("### " + s.heading)
-        for note in s.notes:
+        st.download_button("Download complete calculations (PDF) — ready to print", pdf,
+                           file_name="rigid_diaphragm_handcalcs_calculations.pdf",
+                           mime="application/pdf", use_container_width=True,
+                           key="rigid_calc_pdf_download")
+    st.info("Read Steps 01–10 in order. X/Y loading and both accidental eccentricity signs are distinct cases. An envelope is NOT one simultaneous force state.")
+    for sec in sections:
+        st.markdown("### " + sec.heading)
+        for note in sec.notes:
             st.markdown(note)
-        for label, table in s.tables:
+        for label, table in sec.tables:
             st.markdown("**" + label + "**")
             st.dataframe(_display_table(table), hide_index=True, use_container_width=True)
-        if s.calculations:
-            st.markdown("**Numerical substitutions**")
-            # Distinguish load cases without collapsing any explanation.
-            for line in s.calculations:
-                if line.startswith("--- "):
-                    st.markdown("**" + line.strip("- ") + "**")
-                else:
-                    st.code(line, language=None)
+        if sec.equations:
+            st.markdown("**Handcalcs — symbolic equations and numerical substitutions**")
+            for caption, latex in sec.equations:
+                st.caption(caption)
+                try:
+                    st.latex(_math_body(latex))
+                except Exception:
+                    st.code(latex, language=None)
+        if sec.calculations:
+            with st.expander("Full numerical working and solver trace (plain text)", expanded=not bool(sec.equations)):
+                for line in sec.calculations:
+                    if line.startswith("--- "):
+                        st.markdown("**" + line.strip("- ") + "**")
+                    else:
+                        st.code(line, language=None)
         st.divider()
 
 
@@ -315,8 +400,25 @@ def make_calculation_pdf(sections: list[Section], title: str="Rigid Diaphragm - 
                 ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
             ]))
             story.append(tb);story.append(Spacer(1,6))
+        if section.equations:
+            story.append(Paragraph("Rendered engineering equations (Handcalcs)",styles["RdSub"]))
+            from reportlab.platypus import Image
+            from PIL import Image as PILImage
+            for caption, latex in section.equations:
+                story.append(Paragraph(escape(caption),styles["RdSmall"]))
+                rendered_lines = _latex_formula_png(latex)
+                for formula in rendered_lines:
+                    with PILImage.open(formula) as pic:
+                        image_width, image_height = pic.size
+                    formula.seek(0)
+                    # Keep every equation within printed margins and keep text legible.
+                    scale = min(0.68, usable / max(1, image_width), 70.0 / max(1, image_height))
+                    display_width = image_width * scale
+                    display_height = image_height * scale
+                    story.append(Image(formula, width=display_width, height=display_height, hAlign="LEFT"))
+                story.append(Spacer(1,3))
         if section.calculations:
-            story.append(Paragraph("Numeric substitutions and working",styles["RdSub"]))
+            story.append(Paragraph("Full numeric substitutions and solver working",styles["RdSub"]))
             for line in section.calculations:
                 if line.startswith("--- "):
                     story.append(Paragraph(escape(line.strip("- ")),styles["RdSub"]))
