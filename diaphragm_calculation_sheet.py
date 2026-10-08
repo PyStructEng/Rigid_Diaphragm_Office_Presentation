@@ -220,41 +220,26 @@ def _display_table(table: pd.DataFrame) -> pd.DataFrame:
     return t
 
 
-def _math_body(latex: str) -> str:
-    """Strip display delimiters; st.latex already supplies math mode."""
-    latex = latex.strip()
-    if latex.startswith(r"\[") and latex.endswith(r"\]"):
-        latex = latex[2:-2].strip()
-    return latex
-
-
 def _latex_formula_png(latex: str, *, dpi: int = 170) -> list[BytesIO]:
-    """Render Handcalcs to portable PDF-ready images without external TeX.
+    """Render normalized Handcalcs expressions as PDF-ready PNGs.
 
-    Matplotlib mathtext does not support full aligned environments. Render each
-    alignment line separately; if a line is too advanced, its textual equation
-    still appears later in the numeric substitutions section.
+    Complex KaTeX alignment environments are removed by the shared converter.
+    This avoids bringing a TeX distribution into Streamlit Cloud.
     """
     from matplotlib.mathtext import math_to_image
-    body = _math_body(latex)
-    body = body.replace(r"\begin{aligned}", "").replace(r"\end{aligned}", "")
-    body = body.replace(r"\begin{gathered}", "").replace(r"\end{gathered}", "")
-    body = body.replace("&", "")
-    body = body.replace(r"\text{", r"\mathrm{")
-    chunks = re.split(r"\\\\(?:\[[^\]]*\])?", body)
-    out=[]
-    for chunk in chunks:
-        chunk=chunk.strip().strip("$")
-        if not chunk:
-            continue
+    from engineering_calculations import latex_math_lines
+    out = []
+    for line in latex_math_lines(latex):
+        # Matplotlib mathtext uses \mathrm for descriptive fragments.
+        line = line.replace(r"\text{", r"\mathrm{")
         try:
-            buffer=BytesIO()
-            math_to_image("$" + chunk + "$", buffer, dpi=dpi, format="png", color="#21354A")
+            buffer = BytesIO()
+            math_to_image("$" + line + "$", buffer, dpi=dpi,
+                          format="png", color="#21354A")
             buffer.seek(0)
             out.append(buffer)
         except (ValueError, TypeError):
-            # Preserve the plain-text arithmetic even when mathtext cannot
-            # handle a particular LaTeX macro from a future Handcalcs release.
+            # Keep the numeric solver trace; never substitute an invented value.
             continue
     return out
 
@@ -262,7 +247,7 @@ def _latex_formula_png(latex: str, *, dpi: int = 170) -> list[BytesIO]:
 def render_calculation_tab(walls: pd.DataFrame, settings: dict, result: dict) -> None:
     """Existing ten-section worksheet, enhanced with Handcalcs + unit audit."""
     import streamlit as st
-    from engineering_calculations import equation_by_sections, audit_units
+    from engineering_calculations import equation_by_sections, audit_units, latex_math_lines
 
     st.subheader("Step-by-step rigid diaphragm calculations")
     st.caption("Live results from the existing validated solver. Rendered equations provide a second, scalar calculation trace; ForAllPeople checks the dimensions separately.")
@@ -325,10 +310,10 @@ def render_calculation_tab(walls: pd.DataFrame, settings: dict, result: dict) ->
             st.markdown("**Handcalcs — symbolic equations and numerical substitutions**")
             for caption, latex in sec.equations:
                 st.caption(caption)
-                try:
-                    st.latex(_math_body(latex))
-                except Exception:
-                    st.code(latex, language=None)
+                # A single KaTeX expression is much more portable than handing
+                # Streamlit Handcalcs' entire aligned LaTeX environment.
+                for math_line in latex_math_lines(latex):
+                    st.latex(math_line)
         if sec.calculations:
             with st.expander("Full numerical working and solver trace (plain text)", expanded=not bool(sec.equations)):
                 for line in sec.calculations:
@@ -407,6 +392,8 @@ def make_calculation_pdf(sections: list[Section], title: str="Rigid Diaphragm - 
             for caption, latex in section.equations:
                 story.append(Paragraph(escape(caption),styles["RdSmall"]))
                 rendered_lines = _latex_formula_png(latex)
+                if not rendered_lines:
+                    story.append(Paragraph("Equation image not supported by PDF math renderer; use numeric trace below.", styles["RdSmall"]))
                 for formula in rendered_lines:
                     with PILImage.open(formula) as pic:
                         image_width, image_height = pic.size
