@@ -237,3 +237,91 @@ ORIGINAL ENGINEERING MODULES (UNCHANGED)
    test_calculation_sheet.py
 
 
+   # Rigid Diaphragm Research Lab — Multi-Storey Period & Drift Extension
+
+October 8, 2026 • Adds a self-contained research tab without changing the existing single-level solver.
+
+## Deployment
+
+1. Back up your current working GitHub repository (commit/tag). The ZIP contains a **complete version of your October 8 app**, including the prior Handcalcs + ForAllPeople screenshot fixes.
+2. Extract the ZIP and copy **all `.py` modules and `requirements.txt` into the same directory** in the GitHub repository. Do not rename your Streamlit entrypoint.
+3. Choose the entrypoint already selected in Streamlit Cloud:
+   - `rigid_diaphragm_parametric_app.py`: complete Mechanics V6 research app.
+   - `rigid_diaphragm_parametric_app_GLOBAL_VISUAL_V2.py`: lighter alternative.
+   Both include the new **Multi-storey periods & drift** tab; do not run both entrypoints simultaneously.
+4. Commit/push and wait for Streamlit Cloud to redeploy.
+5. Open the new tab, review assumptions, create/reset to the number of storeys, edit floor loads and wall stiffnesses, and click **Run multi-storey analysis**. Download the PDF in **Equations and printable report**.
+
+No changes have been made to your connected GitHub repository by this ZIP creation.
+
+## What's included
+
+- `multi_storey_core.py`: 3-DOF-per-floor global stiffness/mass solver, static X± and Y± accidental torsion cases, modal eigenmodes and effective participating masses, case-specific Rayleigh checks, worst-plan-corner storey drifts, exact wall force equilibrium, directional reference-height diagnostic, and optional illustrative secant-stiffness sensitivity iteration.
+- `multi_storey_ui.py`: editable floors/wall segments; results and case-by-case tables; plots; print/export; manual design-run comparison; optional **one-way** import of storey secant stiffness snapshots from Wood Wall Lab.
+- `multi_storey_report.py`: print-ready multi-storey research PDF containing the actual inputs, equations, selected numeric substitution, periods, Rayleigh/2/3 diagnostics, floor results, wall-force envelopes, and assumptions.
+- Updated BOTH `rigid_diaphragm_parametric_app*.py` entrypoints: one additional tab at the end; no changes to the old model engine.
+- `test_multi_storey.py` with analytical and equilibrium cases (9 tests).
+- `test_multi_storey_ui_offline.py`: simulated Streamlit UI smoke test (NOT a real browser/integration test).
+- All the original app modules, dependency pins, previous bug fixes, and prior tests.
+
+## Recommended user workflow
+
+1. Get seismic weights `Wi`, verified height-dependent force distribution `Fi`, and wall effective stiffnesses based on the applicable code and wall construction. **The example floor forces in the app are invented demonstration loads, not an NBCC seismic loading algorithm.**
+2. Start with an elastic multi-storey model. Confirm it has enough separate non-collinear walls in X/Y at EACH storey, and check every static load case and wall force envelope.
+3. Review period shapes, X/Y participation, worst-corner interstorey drift and separate +/- torsion effects.
+4. Use the existing Wood Wall Lab and/or independent detailing/design models to revise wall stiffness. Optionally **import** a selected stacked wall's precomputed `k` snapshots; imported snapshots are not magically coupled to the global model.
+5. After determining the permitted building **seismic strength period** and appropriate seismic forces separately under the applicable NBCC/BCBC, update floor forces in the new tab and rerun. The manual run-history table compares periods, drifts and total forces across your design cycles.
+6. Use the Handcalcs/ForAllPeople calculation tab for the original single-level model. Print a separate multi-storey PDF from the new tab.
+
+## Mathematical model
+
+All levels share a *fixed* plan reference `(Lx/2, Ly/2)` and each floor has three rigid-plate DOFs `qi=[Ux,Uy,theta]`.
+
+Wall deformation: `dij = aj^T (qi-q(i-1))`, wall force: `Vij=kij*dij`.
+
+For an X-wall at `(xj,yj)`: `aj=[1,0,-(yj-yref)]`. For a Y-wall: `aj=[0,1,xj-xref]`.
+
+Assemble `Si=sum(kij * aj * aj^T)`, then a connected multilevel K from `(qi-q(i-1))` springs. The rigid-plate mass matrix includes eccentric centre-of-mass coupling and `Icm=m*(Lx^2+Ly^2)/12` for a **uniform rectangular plate assumption**. Solve `K q=F` and `K phi=omega^2 M phi`.
+
+Rayleigh validation uses the full deformed displacement vector: `TR=2*pi*sqrt[(q^T M q)/(q^T K q)]`; reported for each distinct X+ X- Y+ Y- static case.
+
+For the simplified 2/3-height approximation shown in the 2015 APEGBC worked example, the diagnostic uses **V_D = sum of all input floor forces in that direction**, not just loads above 2H/3. Take the interpolation of reference-point lateral displacement at `z=2H/3`, estimate `K_equiv=|V_D|/|u(2H/3)|`, and compute `T_est=2*pi*sqrt(Wtotal/(g*K_equiv))`. It is an illustrative historical approximation, **not** an independently code-approved design period.
+
+## Engineering limitations: read before using on any building
+
+**This is NOT a general-purpose 5–6-storey wood shearwall design program.** In particular:
+
+- The global interstorey elements are **independent shear springs**. The model does NOT capture bending/rocking continuity of wood shearwalls, load-dependent hold-down slip from forces applied to a fully compatible continuous wall, wall flexure, coupling beams, foundation rotational restraints, or diaphragm flexibility.
+- The optional damping/iteration mode uses a **user-controlled UNCALIBRATED power-law stiffness sensitivity**; it is OFF by default. It is *not* the Wood Wall Lab mechanics, not an automatically redesigned wall, and not a seismic period–base-shear feedback process. The entered lateral load vectors stay fixed throughout automated stiffness iteration. A manual design-run table permits comparison while the engineer updates demands and stiffness externally.
+- Mass is uniformly distributed over a rectangular plate for each entered floor, with user-defined floor CM. For unusual floor mass configurations use an independently verified mass matrix.
+- No NBCC/BCBC hazard, spectrum, period cap, force reduction/amplification, `Ft`, seismic load combinations, torsional sensitivity classification, drift amplification, strength or deformation/irregularity limitations, second-order P–Delta effects, wall collector/chord design, base isolation or building safety verification are implemented.
+- Accidental eccentricity percentage is **entered by the user**, not prescribed by the program. The four distinct load cases are **not automatically code-combined**; the envelope is not one simultaneous physical force state.
+- The historic APEGBC Appendix E six-storey example is **methodological reference only**. The included demo geometry, wall stiffnesses and forces are not that reference structure, and the program has not been independently validated to match its six-storey output.
+
+Before using structural results on a project, implement/validate continuous-wall element coupling and applicable Canadian seismic code inputs, check the results against independent structural analysis software and review with the responsible structural engineer.
+
+## Tests
+
+From the app folder (Python 3.10+):
+
+```bash
+python -m pip install -r requirements.txt
+python -m unittest test_multi_storey -v
+python test_multi_storey_ui_offline.py
+python test_calculation_sheet.py
+python test_upgrade_offline.py
+python test_upgrade_live.py
+streamlit run rigid_diaphragm_parametric_app.py
+```
+
+The `test_upgrade_live.py` step validates the *real installed* Handcalcs/ForAllPeople APIs; the build environment used for this package did not have those dependencies or Streamlit installed, so a full live browser check was **not** performed here.
+
+## References
+
+- APEGBC / Engineers and Geoscientists BC, *5 and 6 Storey Wood Frame Residential Building Projects (Mid-Rise)*, revised April 2015, Appendix E, Period Convergence Calculations: https://www.egbc.ca/getmedia/eea8aecd-8407-4fdf-8076-3f4f6eac5260/APEGBC-Technical_and_Practice_Bulletin_on_Mid-Rise_Buildings.pdf
+- FPInnovations / Canadian Wood Council, *Design of stacked multistorey wood shearwalls using a mechanics-based approach*: https://old.cwc.ca/wp-content/uploads/2019/03/Design-of-stacked-multistorey-wood-shearwalls-using-a-mechanics-based-approach.pdf
+
+These citations do not imply a code validation or certification of this prototype.
+
+
+
