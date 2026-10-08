@@ -1366,6 +1366,12 @@ def main() -> None:
                 m3.metric("Secant stiffness k", f"{float(srow['k secant (kN/m)']):,.0f} kN/m")
                 m4.metric("Lc", f"{float(srow['Lc (mm)'])/1000:.3f} m")
                 m5.metric("Rod T/Tr", f"{100*float(srow['Rod utilization T/Tr']):.1f}%")
+                from engineering_calculations import render_wood_secant_panel
+                render_wood_secant_panel(
+                    float(srow["Storey shear V (kN)"]),
+                    float(srow["Δ total inter-storey (mm)"]),
+                    float(srow["k secant (kN/m)"]),
+                )
 
                 sc1, sc2 = st.columns([1.15, 1.0])
                 with sc1:
