@@ -106,3 +106,48 @@ connect selected wall stiffness differences to:
 That second stage is where the office reference can answer when a simple relative-
 stiffness assumption is adequate and when mechanics-based stiffness materially
 changes the rigid-diaphragm result.
+
+
+RIGID DIAPHRAGM RESEARCH LAB - NEW STEP-BY-STEP CALCULATIONS TAB
+================================================================
+
+WHAT IS NEW
+- One new 'Step-by-step calculations' tab at the end of the existing app.
+- Ten calculation sections, formulas and substitutions for every wall.
+- X and Y loading, plus/minus accidental eccentricity, CR, J, direct/torsional forces,
+  local wall forces, wall envelopes, equilibrium checks, and next-step design workflow.
+- A PDF download button, showing the CURRENT app inputs and results and suitable for printing.
+
+DEPLOYMENT TO STREAMLIT COMMUNITY CLOUD / GITHUB
+1. Back up your existing working GitHub repository first.
+2. Extract this ZIP file. Copy the following files together into your repository's app folder:
+   rigid_diaphragm_core.py
+   wood_shearwall_mechanics.py
+   diaphragm_calculation_sheet.py          [NEW]
+   requirements.txt                        [ensure reportlab>=4.0]
+3. For the main Mechanics V6 application (the most complete 1,900-line source), replace
+   rigid_diaphragm_parametric_app.py with the copy here.
+   If your deployment instead uses 'rigid_diaphragm_parametric_app_GLOBAL_VISUAL_V2.py',
+   replace that file with the copy here; both are updated.
+   You only need to choose the entrypoint that your Streamlit deployment currently uses.
+4. Commit / push your changes and wait for Streamlit to redeploy.
+5. Open the new 'Step-by-step calculations' tab. Use its PDF button.
+
+LOCAL RUN (with Python 3.10+)
+  pip install -r requirements.txt
+  streamlit run rigid_diaphragm_parametric_app.py
+
+OPTIONAL TESTS
+  python test_calculation_sheet.py
+
+CAUTIONS
+- Calculation sheet reports existing solver outputs; it is NOT a second analysis engine.
+- For each X/Y case, the reported torsional equilibrium uses diaphragm forces before
+  local wall forces; this mirrors the solver's assumptions.
+- Your model's specified accidental eccentricity ratio is not automatically selected from code.
+- Current result is single-level in-plane rigid diaphragm force distribution. Confirm
+  all relevant code/load provisions and separate strength, stiffness, load-path and
+  drift design checks before applying on a real project.
+
+The included sample PDF is generated using the application's FPInnovations preset.
+
