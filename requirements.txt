@@ -1,6 +1,11 @@
 streamlit>=1.35
-pandas>=2.0
 numpy>=1.24
+pandas>=2.0
 matplotlib>=3.7
 openpyxl>=3.1
-reportlab>=4.0 
+reportlab>=4.0
+
+# Unit-aware verification and typeset scalar equations
+forallpeople==3.0.0
+handcalcs==1.11.0
+
