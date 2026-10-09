@@ -15,6 +15,7 @@ import streamlit as st
 
 from diaphragm_calculation_sheet import render_calculation_tab
 from multi_storey_ui import render_multi_storey_tab
+from wall_design_ui import render_wall_design_studio
 
 from rigid_diaphragm_core import (
     analyze_model,
@@ -858,6 +859,7 @@ def main() -> None:
         "Validation & export",
         "Step-by-step calculations",
         "Multi-storey periods & drift",
+        "Wall design studio",
     ])
 
     # ------------------------------------------------------------------
@@ -1924,6 +1926,9 @@ def main() -> None:
     # ------------------------------------------------------------------
     with tabs[10]:
         render_multi_storey_tab(clean_walls, settings)
+
+    with tabs[11]:
+        render_wall_design_studio(clean_walls, settings)
 
     st.divider()
     st.caption("Research Lab Mechanics V6 - Method 4 updates all participating wood-wall stiffnesses simultaneously and retains full mechanics, CR and wall-force history for validation and reporting.")
